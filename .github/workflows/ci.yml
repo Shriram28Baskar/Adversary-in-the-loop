@@ -16,6 +16,22 @@ jobs:
   checks:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    # Real PostgreSQL for the database security tests (never SQLite or mocks),
+    # pinned by digest to the same image as deploy/versions.env. The container is
+    # disposable; its admin password is per-run and never committed.
+    services:
+      postgres:
+        image: postgres:16.10-alpine@sha256:029660641a0cfc575b14f336ba448fb8a75fd595d42e1fa316b9fb4378742297
+        env:
+          POSTGRES_USER: aitl_admin
+          POSTGRES_PASSWORD: ci-${{ github.run_id }}-${{ github.run_attempt }}
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U aitl_admin"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -39,8 +55,13 @@ jobs:
       - name: Type check (mypy --strict)
         run: uv run --locked mypy
 
-      # Unit tests plus the Compose topology and secret-hygiene security tests.
-      # The topology tests render docker-compose.yml with the Docker Compose CLI
-      # preinstalled on the runner; no containers are started.
+      # Unit tests, Compose topology and secret-hygiene tests, and the database
+      # security suite (migrations, grants, constraints, ORM/DDL consistency)
+      # against the PostgreSQL service. The pg_hba syntax check uses the
+      # PostgreSQL server binaries preinstalled on the runner image.
       - name: Tests
+        env:
+          AITL_TEST_PG_ADMIN_DSN: >-
+            host=localhost port=5432 dbname=postgres user=aitl_admin
+            password=ci-${{ github.run_id }}-${{ github.run_attempt }}
         run: uv run --locked pytest
