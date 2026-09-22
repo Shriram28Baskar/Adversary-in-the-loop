@@ -25,6 +25,9 @@ dev = [
     "httpx==0.28.1",
     "pyyaml==6.0.3",
     "types-pyyaml==6.0.12.20260906",
+    # Migration tooling: run only by the migration job with admin credentials,
+    # never by a runtime service (ARCHITECTURE.md §24).
+    "alembic==1.20.0",
 ]
 
 [tool.ruff]
@@ -39,9 +42,10 @@ select = ["E", "F", "W", "I", "B", "UP", "S", "N", "SIM", "RUF", "PT", "BLE"]
 known-first-party = ["aitl_common", "tests"]
 
 [tool.ruff.lint.per-file-ignores]
-# Tests assert, and the topology/secret tests invoke fixed local CLIs (docker, git).
-"**/tests/**" = ["S101", "S104", "S603", "S607"]
-"tests/**" = ["S101", "S104", "S603", "S607"]
+# Tests assert, invoke fixed local CLIs (docker, git, psql, pg_ctl), and build
+# probe SQL from fixed schema identifiers (never from input), so S608 is safe there.
+"**/tests/**" = ["S101", "S104", "S603", "S607", "S608"]
+"tests/**" = ["S101", "S104", "S603", "S607", "S608"]
 
 [tool.mypy]
 python_version = "3.11"
@@ -49,7 +53,7 @@ strict = true
 warn_unreachable = true
 mypy_path = ["packages/aitl_common/src"]
 explicit_package_bases = true
-files = ["packages", "tests"]
+files = ["packages", "tests", "migrations"]
 
 [tool.pytest.ini_options]
 testpaths = ["packages", "tests"]

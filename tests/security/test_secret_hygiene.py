@@ -29,9 +29,14 @@ SECRET_PATTERNS: dict[str, re.Pattern[str]] = {
     "aws access key": re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
     "github token": re.compile(r"\bgh[pousr]_[A-Za-z0-9]{30,}"),
     "slack token": re.compile(r"\bxox[abprs]-[A-Za-z0-9\-]{10,}"),
+    # `:` directly followed by a quoted identifier is a psql variable reference
+    # (e.g. PASSWORD :'role_password'), not a literal value.
     "inline secret assignment": re.compile(
-        r"(?i)\b(password|passwd|secret|api_?key|token)\b\s*[:=]\s*['\"][^'\"$\s{}<>]{12,}['\"]"
+        r"(?i)\b(password|passwd|secret|api_?key|token)\b\s*"
+        r"(?:=|:(?!'[a-z_][a-z0-9_]*'))\s*['\"][^'\"$\s{}<>]{12,}['\"]"
     ),
+    # Literal values only; template placeholders ({x}, $x, %s) are not secrets.
+    "SQL password literal": re.compile(r"(?i)\bPASSWORD\s+E?'[^'\s{}$%:]{8,}'"),
 }
 
 
@@ -68,6 +73,9 @@ def test_tracked_files_contain_no_secrets() -> None:
         "ghp_" + "a" * 36,
         'password = "correct-horse-battery"',
         "api_key: 'abcdefghijklmnopqrst'",
+        "ALTER ROLE intel_svc PASSWORD 'correct-horse-battery';",
+        "CREATE ROLE x LOGIN PASSWORD E'correct-horse-battery'",
+        "password: 'correct-horse-battery'",
     ],
 )
 def test_scanner_detects_known_secret_shapes(sample: str) -> None:
@@ -81,6 +89,8 @@ def test_scanner_detects_known_secret_shapes(sample: str) -> None:
         "password = os.environ['X']",
         'token = "${SERVICE_TOKEN}"',
         "the capability token is revoked at teardown",
+        "ALTER ROLE intel_svc LOGIN PASSWORD :'intel_svc_password';",
+        "f\"CREATE ROLE aitl_intruder LOGIN PASSWORD '{password}'\"",
     ],
 )
 def test_scanner_ignores_references_to_secrets(sample: str) -> None:

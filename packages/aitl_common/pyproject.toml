@@ -5,6 +5,8 @@ description = "Shared primitives for Adversary-in-the-Loop services: canonical h
 requires-python = ">=3.11,<3.12"
 dependencies = [
     "fastapi==0.141.1",
+    "sqlalchemy==2.0.54",
+    "psycopg[binary]==3.3.6",
 ]
 
 [build-system]
