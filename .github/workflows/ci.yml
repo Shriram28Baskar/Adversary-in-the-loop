@@ -1,0 +1,46 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.8.17"
+
+      - name: Install locked environment
+        run: uv sync --locked
+
+      - name: Format check
+        run: uv run --locked ruff format --check .
+
+      - name: Lint
+        run: uv run --locked ruff check .
+
+      - name: Type check (mypy --strict)
+        run: uv run --locked mypy
+
+      # Unit tests plus the Compose topology and secret-hygiene security tests.
+      # The topology tests render docker-compose.yml with the Docker Compose CLI
+      # preinstalled on the runner; no containers are started.
+      - name: Tests
+        run: uv run --locked pytest
