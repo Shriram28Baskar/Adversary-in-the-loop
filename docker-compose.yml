@@ -1,0 +1,63 @@
+# Adversary-in-the-Loop — single-host profile (ARCHITECTURE.md §28, §31).
+#
+#   deploy/secrets/generate.sh
+#   docker compose --env-file deploy/versions.env up
+#
+# Network topology is the security boundary. It is verified by
+# tests/security/test_compose_topology.py against ARCHITECTURE.md §28; any
+# change here must keep that test passing. Services are added in the phase
+# that implements them (engineering plan §4). Per-execution agent sandboxes
+# are not Compose services: agent-runtime creates them on sandbox-net.
+#
+# The internet-exposed honeypot never runs from this file (PRD FR-004d); see
+# deploy/honeypot-host/ (ADR-010).
+
+name: aitl
+
+services:
+  db:
+    image: ${POSTGRES_IMAGE:?POSTGRES_IMAGE must be set via deploy/versions.env}
+    environment:
+      POSTGRES_DB: aitl
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_superuser_password
+    secrets:
+      - postgres_superuser_password
+    networks:
+      - core-net
+      - ingest-net
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d aitl"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+networks:
+  # Attacker-facing; in the single-host profile it is internal with no
+  # published port and used only by the honeypot isolation tests.
+  honeypot-net:
+    internal: true
+  # Log Shipper -> db (intel_raw staging only).
+  ingest-net:
+    internal: true
+  # Core services; no honeypot access.
+  core-net:
+    internal: true
+  # The running sandbox's only peer is gateway-service's sandbox listener.
+  sandbox-net:
+    internal: true
+  # agent-runtime -> container-api-proxy only (ADR-019).
+  orchestration-net:
+    internal: true
+  # Outbound for gateway-service's Model Proxy only (ADR-012).
+  llm-egress: {}
+  # Operator browser access to the dashboard, published on 127.0.0.1 only.
+  operator-net: {}
+
+volumes:
+  db-data: {}
+
+secrets:
+  postgres_superuser_password:
+    file: deploy/secrets/generated/postgres_superuser_password
