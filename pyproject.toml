@@ -1,0 +1,58 @@
+# Adversary-in-the-Loop — uv workspace root (virtual; not itself a package).
+# Runtime dependencies live in each member's pyproject.toml and are pinned exactly.
+# Development tooling is pinned exactly here. uv.lock pins the full transitive set.
+
+[project]
+name = "aitl-workspace"
+version = "0.0.0"
+requires-python = ">=3.11,<3.12"
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.uv.sources]
+aitl-common = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "aitl-common",
+    "ruff==0.16.8",
+    "mypy==2.3.1",
+    "pytest==9.1.1",
+    "httpx==0.28.1",
+    "pyyaml==6.0.3",
+    "types-pyyaml==6.0.12.20260906",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["migrations/versions"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "N", "SIM", "RUF", "PT", "BLE"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["aitl_common", "tests"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests assert, and the topology/secret tests invoke fixed local CLIs (docker, git).
+"**/tests/**" = ["S101", "S104", "S603", "S607"]
+"tests/**" = ["S101", "S104", "S603", "S607"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unreachable = true
+mypy_path = ["packages/aitl_common/src"]
+explicit_package_bases = true
+files = ["packages", "tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["packages", "tests"]
+addopts = ["--strict-markers", "--strict-config", "-ra", "--import-mode=importlib"]
+pythonpath = ["."]
+xfail_strict = true

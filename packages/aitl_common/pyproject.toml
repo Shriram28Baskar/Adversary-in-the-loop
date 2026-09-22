@@ -1,0 +1,15 @@
+[project]
+name = "aitl-common"
+version = "0.1.0"
+description = "Shared primitives for Adversary-in-the-Loop services: canonical hashing, structured logging, service authentication."
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "fastapi==0.141.1",
+]
+
+[build-system]
+requires = ["uv_build==0.8.17"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "aitl_common"
