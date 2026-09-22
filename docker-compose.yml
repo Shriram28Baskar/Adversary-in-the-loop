@@ -17,16 +17,29 @@ name: aitl
 services:
   db:
     image: ${POSTGRES_IMAGE:?POSTGRES_IMAGE must be set via deploy/versions.env}
+    # Roles and database privileges: ARCHITECTURE.md §24. Runtime roles are
+    # created on first initialization (10-init-roles.sh); schema objects and
+    # grants come only from the Alembic migrations, owned by NOLOGIN aitl_owner.
+    command: ["postgres", "-c", "hba_file=/etc/aitl/pg_hba.conf", "-c", "password_encryption=scram-sha-256"]
     environment:
       POSTGRES_DB: aitl
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_superuser_password
     secrets:
       - postgres_superuser_password
+      - ingest_writer_password
+      - intel_svc_password
+      - scenario_gen_password
+      - agent_svc_password
+      - gateway_svc_password
+      - eval_svc_password
     networks:
       - core-net
       - ingest-net
     volumes:
       - db-data:/var/lib/postgresql/data
+      - ./deploy/postgres/pg_hba.conf:/etc/aitl/pg_hba.conf:ro
+      - ./deploy/postgres/init-roles.sql:/etc/aitl/init-roles.sql:ro
+      - ./deploy/postgres/10-init-roles.sh:/docker-entrypoint-initdb.d/10-init-roles.sh:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d aitl"]
       interval: 5s
@@ -61,3 +74,15 @@ volumes:
 secrets:
   postgres_superuser_password:
     file: deploy/secrets/generated/postgres_superuser_password
+  ingest_writer_password:
+    file: deploy/secrets/generated/ingest_writer_password
+  intel_svc_password:
+    file: deploy/secrets/generated/intel_svc_password
+  scenario_gen_password:
+    file: deploy/secrets/generated/scenario_gen_password
+  agent_svc_password:
+    file: deploy/secrets/generated/agent_svc_password
+  gateway_svc_password:
+    file: deploy/secrets/generated/gateway_svc_password
+  eval_svc_password:
+    file: deploy/secrets/generated/eval_svc_password

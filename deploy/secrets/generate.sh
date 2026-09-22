@@ -11,7 +11,13 @@ set -eu
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 OUT_DIR="$SCRIPT_DIR/generated"
 
-SECRETS="postgres_superuser_password"
+SECRETS="postgres_superuser_password
+ingest_writer_password
+intel_svc_password
+scenario_gen_password
+agent_svc_password
+gateway_svc_password
+eval_svc_password"
 
 FORCE=0
 if [ "${1:-}" = "--force" ]; then
