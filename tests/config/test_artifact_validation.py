@@ -357,6 +357,13 @@ CASES: list[tuple[str, Mutation, IssueType, str | None]] = [
         None,
     ),
     (
+        # P5-D4 (ADR-025): unclassified behavior never yields a TTP.
+        "ttp-targets-unclassified",
+        _yaml("intel/ttp_rules_v1.yaml", _set(("rules", 0, "phase"), "unclassified")),
+        IssueType.INVALID_VALUE,
+        "unclassified",
+    ),
+    (
         "ttp-unsupported-label",
         _yaml("intel/ttp_rules_v1.yaml", _set(("rules", 0, "label"), "bogus_label")),
         IssueType.UNSUPPORTED_LABEL,

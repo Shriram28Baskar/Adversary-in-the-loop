@@ -233,7 +233,7 @@ A staged payload that no longer validates is quarantined as `promotion.invalid_p
 
 ## 11. TTP Extraction Architecture
 
-The TTP Classifier is a deterministic rule engine: a version-controlled table of `(behavior phase, token/prefix pattern) → (TTP label, confidence)`. Matching uses token and prefix comparisons over normalized text — no backtracking regular expressions over attacker input — so matching time is linear in input length. Confidence is the matched rule's fixed value, the maximum when several rules match (`PRD.md` FR-007, FR-008). It never calls an LLM (ADR-003).
+The TTP Classifier is a deterministic rule engine: a version-controlled table of `(behavior phase, token/prefix pattern) → (TTP label, confidence)`. Matching uses token and prefix comparisons over normalized text — no backtracking regular expressions over attacker input — so matching time is linear in input length. Confidence is the matched rule's fixed value, the maximum when several rules match (`PRD.md` FR-007, FR-008). It never calls an LLM (ADR-003). The P5 semantics are frozen in ADR-025: classification is behavior-anchored and scoped to a `(ttp_rules_version, mapping_version)` pair; it runs as a separate step over committed P4 evidence in one transaction per session and version pair; TTP IDs are deterministic.
 
 ## 12. MITRE ATT&CK Mapping
 
@@ -748,6 +748,59 @@ Per `PROJECT_VISION.md §15`: extend the Replay Engine into a security-learning 
 **ADR-023 — Cowrie fetch emulation restricted, not removed.** *Decision:* keep the pinned upstream Cowrie 3.0.15 image and restrict its download/fetch emulation (`wget`, `curl`, `tftp`, `ftpget`, `nc`) in configuration: `out_addr = 127.0.0.1` (every fetch socket binds to loopback, which the kernel refuses to route off-host) and `download_limit_size = 1`; upstream additionally refuses non-globally-routable targets. Zero egress at the network layer (§9) stays the authoritative control. *Rationale:* 3.0.15 exposes no switch that removes the emulation; a custom image to delete it would add a maintained fork on the attacker-facing component for no gain over two independent controls. *Evidence:* the fetch paths are verified against sha256-pinned upstream sources, and a runtime test shows a loopback-bound socket fails (EINVAL) even on an open network (`tests/security/test_cowrie_fetch_restriction.py`, `tests/security/test_runtime_isolation.py`). *Residual risk:* a future Cowrie release could add a fetch path that ignores `out_addr`; upgrading the pin re-runs the source checks, which fail on changed files.
 
 **ADR-024 — Deterministic promotion and reconstruction semantics (P4, D1–D7).** *Decision:* the rules listed in §10: close-triggered promotion, `(occurred_at, raw_record_id)` event order, one behavior per distinct phase, UUIDv5 identifiers in fixed namespaces, connect-owned network fields with whole-session quarantine on conflict, and a fixed event-type → text mapping. *Rationale:* the frozen PRD/§10 left event order, completion trigger, late events, behavior granularity, identifier derivation, session-field ownership and per-event text unspecified, and FR-006 requires repeated runs to produce identical output. Each choice keeps attacker text out of every ordering, grouping and identity decision. `raw_record_id` is the immutable P3 staging identity. The UUIDv5 names use only configuration-derived and positional values, so a fixed staging dataset (including its `raw_record_id` values) with identical artifact and code versions produces identical rows, identifiers included. Different staging-ID assignments may reorder events with identical timestamps (see the determinism guarantee in §10). *Trade-offs:* a session without `session_closed` (for example a Cowrie crash) is never promoted until an idle-timeout policy is separately decided; events arriving after promotion are quarantined, not merged; compound shell commands are not split (rules see the first token), so `cd /tmp && wget …` is `unclassified`. *Alternatives rejected:* payload-hash tie-breaking (couples order to attacker content); per-run segmentation into contiguous phase runs (ill-defined for multi-phase events); database-generated random UUIDs (non-deterministic identity).
+
+**ADR-025 — P5 TTP / ATT&CK intelligence semantics (D1–D14), frozen before implementation.** P5 turns committed P4 evidence into TTP intelligence. P4 records stay untouched; P6 owns abstraction, chains and `ThreatPatternSource`.
+
+*Descriptive facts (what the v1 artifacts do today):* `ttp_rules_v1` has 17 rules, each keyed on a behavior phase with a `phase`, `command`, `command_prefix` or `command_with_argument_prefix` match, a label and a fixed confidence. `attack_mapping_v1` pins ATT&CK Enterprise 15.1 and maps 14 labels to one tactic and one technique each (7 tactics, 14 techniques); `resource_hijacking` is declared unmapped. The curated subset was verified against MITRE's published 15.1 STIX bundle (sha256 `a57988bffe402bb3e19d92dbe80a12143e1970b814e013e080f9df2fa5a3f6bc`): every object exists with its exact name and tactic, and none is revoked or deprecated. A hash-pinned extract of that bundle is vendored as offline evidence in `tests/config/data/attack-enterprise-15.1/`.
+
+*Frozen engineering decisions:*
+- **D1 evidence anchor:** a TTP is behavior-anchored and records `behavior_id`, `rule_id`, `first_event_seq`, `ttp_rules_version`, `mapping_version`, `label`, `confidence`, `mapping_status` and, if mapped, `tactic_id`. There is no `ttp_event` table in v1. The full set of matching events can be recomputed from the behavior's events and the pinned rule version. Anchor chain: TTP → behavior → `first_event_seq` → `attack_event` → raw record.
+- **D2 duplicate labels:** every matching rule contributes; one row per label per behavior. `confidence` = the maximum over the contributing rules; `rule_id` = the highest-confidence rule, ties broken by the lowest `rule_id` string (`TR-NN`, so lexicographic order = numeric order). No sum, average or first-match.
+- **D3 `first_event_seq`:** a phase rule gives the behavior's first `seq`; a command or prefix rule gives the lowest `seq` of a matching `command_input` event; per label, the minimum over the contributing rules. It is an evidence position, not P6's chain order.
+- **D4 no match:** a behavior no rule matches (including `unclassified`) produces no TTP row. A rule-produced label listed in `unmapped_labels` produces a TTP with `mapping_status = unmapped`, no tactic and no technique rows. These two states are never collapsed.
+- **D5 v1 artifacts frozen:** `phase_rules_v1`, `ttp_rules_v1` and `attack_mapping_v1` are not changed by P5. Improvements require new, separately reviewed versions (e.g. `ttp-rules-v2`).
+- **D6 identity:** TTP `id` = UUIDv5 in a fixed repository namespace over the P0 canonical JSON of (session identity (`source_type`, `cowrie_session_id`), behavior `ordinal`, `label`, `ttp_rules_version`, `mapping_version`). It never depends on randomness, clock, insertion order, row IDs, iteration order or attacker text.
+- **D7 versioning:** classification is scoped to a `(ttp_rules_version, mapping_version)` pair. Each session is classified once per pair; earlier pairs' rows stay immutable. Consumers select an explicit, configured active pair; there is no mutable "current" representation. Pairs are never mixed within one P6 or evaluation context.
+- **D8 lifecycle:** P5 is a separate step after P4 commits. Per session and version pair, one transaction writes all TTP rows, technique rows and a completion record, or nothing. A failure rolls back that session and pair only and is retried; P4 is never involved or mutated. Completion is an explicit record written in that same transaction, never inferred from any particular TTP existing (see prerequisites).
+- **D9 ATT&CK evidence:** release pinned at Enterprise 15.1 and unchanged. A minimal, canonical, hash-pinned extract of only the used objects, plus the source URL and bundle SHA-256, is vendored and validated offline (`tests/config/test_attack_evidence.py`). Runtime code never fetches ATT&CK data.
+- **D10 no release/hash columns:** `mapping_version` identifies the mapping; its content is hash-locked by P2 (`tests/config/test_artifact_lock.py`).
+- **D11 integrity:** at most one row per (`behavior_id`, `label`, `ttp_rules_version`, `mapping_version`); a `mapped` TTP has at least one technique row; an `unmapped` TTP has none. These are enforced by the database, not only by code (see prerequisites).
+- **D12 single writer:** only `intel_service/classification.py` writes `intel.ttp`/`intel.ttp_technique` (static test `tests/security/test_intel_p5_writer_boundary.py`), as `intel_svc`.
+- **D13 write order:** TTP rows by (behavior `ordinal`, `first_event_seq`, `label`); technique rows by technique-ID string. This is a reproducibility order, not P6's chain order.
+- **D14 confidence:** informational only. There is no threshold, and confidence never suppresses a TTP or mapping, nor gates abstraction, scenarios or policy.
+
+*Invariants:*
+- `source_type` is reached only through the session and is never inferred or written by P5.
+- P5 reads normalized P4 fields; rules use token equality and `startswith` only (no regex, no shell parsing).
+- No subprocess, network, eval/exec, dynamic import or LLM; all SQL is parameterized.
+- TTP rows hold only trusted labels, IDs and configuration values.
+
+*Known v1 limitations (documented and intentionally unchanged; they remain reproducible under v1):*
+- `curl -T` (an upload) also falls into P4's `ingress_transfer` phase, because PR-10 matches `curl` generically. Phase-level TR-14 then yields **T1105 Ingress Tool Transfer at 0.90** for an upload.
+- TR-01 yields **T1595 Active Scanning (0.40)** for every session, from the connect event alone.
+- TR-02 yields **T1110.001 Password Guessing (0.90)** from a single successful login.
+- TR-03/TR-04 and TR-15/TR-16 overlap on one label; D2 keeps one row per label.
+- These are not desired semantics; only a separately versioned artifact may change them.
+
+*Implementation prerequisites (schema; specified here, not yet migrated — the P5 implementation must obtain approval for exactly this migration before writing code that depends on it):* migration `0015`:
+- (a) `CREATE UNIQUE INDEX ux_ttp_behavior_label_versions ON intel.ttp (behavior_id, label, ttp_rules_version, mapping_version)`. Defense in depth: the deterministic primary key enforces uniqueness only if every writer derives IDs correctly.
+- (b) A constraint trigger, `DEFERRABLE INITIALLY DEFERRED`, on `intel.ttp` insert, rejecting at commit a `mapped` TTP with no `intel.ttp_technique` row. Plus an immediate trigger on `intel.ttp_technique` insert rejecting a technique for an `unmapped` TTP.
+- (c) `FOREIGN KEY (session_id, first_event_seq) REFERENCES intel.attack_event (session_id, seq)` on `intel.ttp`, so the evidence position always names an existing event of the session. Membership in the behavior is enforced by code and tests.
+- (d) A completion table, `intel.ttp_classification`:
+  - columns: `session_id` (FK to `attack_session`, not null), `ttp_rules_version`, `mapping_version`, `ttp_count >= 0`, `created_at`;
+  - primary key: (`session_id`, `ttp_rules_version`, `mapping_version`);
+  - append-only via `public.aitl_forbid_mutation`, in the FR-044 list;
+  - `GRANT SELECT, INSERT` to `intel_svc` only;
+  - written last in the per-session transaction; "classified" ⇔ this row exists.
+
+  The existing schema cannot represent "classified, zero TTPs". The `ops.events` outbox is not a record of truth and `intel_svc` cannot read it.
+
+*Alternatives rejected:*
+- a `ttp_event` evidence table (redundant with deterministic recomputation);
+- one row per matching rule (contradicts FR-008's maximum);
+- running classification inside P4's promotion transaction (couples a frozen phase to P5 artifacts and failures);
+- inferring completion from TR-01 output (breaks as soon as a rules version changes);
+- confidence thresholds (not in the spec).
 
 ## 37. Initial Configuration-as-Data Artifacts (v1)
 
