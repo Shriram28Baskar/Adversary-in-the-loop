@@ -15,6 +15,7 @@ from sqlalchemy import (
     Text,
     Uuid,
     func,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -26,6 +27,14 @@ class RawIngestRecord(Base):
     __tablename__ = "raw_ingest_record"
     __table_args__ = (
         PrimaryKeyConstraint("id", name="pk_raw_ingest_record"),
+        # Replay-safe ingestion (migration 0014): one event row per line and mode.
+        Index(
+            "ux_raw_ingest_record_event",
+            "ingest_mode",
+            "payload_sha256",
+            unique=True,
+            postgresql_where=text("kind = 'event'"),
+        ),
         {"schema": "intel_raw"},
     )
 
@@ -53,6 +62,15 @@ class QuarantineRecord(Base):
             name="fk_quarantine_record_raw_record",
         ),
         Index("ix_quarantine_record_raw_record_id", "raw_record_id"),
+        # Replay-safe shipper quarantine (migration 0014).
+        Index(
+            "ux_quarantine_record_shipper",
+            "stage",
+            "reason_code",
+            text("sha256(payload::text::bytea)"),
+            unique=True,
+            postgresql_where=text("raw_record_id IS NULL"),
+        ),
         {"schema": "intel_raw"},
     )
 

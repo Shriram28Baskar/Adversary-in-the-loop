@@ -128,7 +128,7 @@ def job_db(pg: Cluster, fresh_db: str, password_file: Path) -> str:
 
 def test_job_migrates_empty_database_as_migrator(pg: Cluster, job_db: str) -> None:
     snapshot = _snapshot(pg, job_db)
-    assert snapshot["version"] == [("0013",)]
+    assert snapshot["version"] == [("0014",)]
     assert {row[0] for row in snapshot["schemas"]} == set(APP_SCHEMAS)
     assert {row[1] for row in snapshot["schemas"]} == {OWNER_ROLE}
     assert {row[3] for row in snapshot["relations"]} == {OWNER_ROLE}
