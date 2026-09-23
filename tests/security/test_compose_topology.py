@@ -231,19 +231,32 @@ def _reference() -> tuple[dict[str, Any], dict[str, Any]]:
             **_hardened(256 * 1024 * 1024, 0.5, 64, "65534:65534"),
             volumes=[
                 {
-                    "type": "volume",
-                    "source": "honeypot-logs",
-                    "target": "/logs",
+                    "type": "bind",
+                    "source": "/repo/corpus/honeypot_sessions_v1",
+                    "target": compose_policy.SHIPPER_SOURCE,
                     "read_only": True,
-                }
+                },
+                {
+                    "type": "volume",
+                    "source": compose_policy.SHIPPER_STATE_VOLUME,
+                    "target": compose_policy.SHIPPER_STATE,
+                },
             ],
-            environment={"INGEST_PASSWORD_FILE": "/run/secrets/ingest_writer_password"},
+            tmpfs=["/tmp:size=8m"],  # noqa: S108 - a container tmpfs spec
+            environment={**compose_policy.SHIPPER_REQUIRED_ENV, "AITL_DB_NAME": "aitl"},
+            secrets=[{"source": "ingest_writer_password"}],
+            healthcheck={"test": ["CMD", "python", "-m", "log_shipper.health"]},
+            depends_on={"db": {"condition": "service_healthy"}},
         ),
         "db": _svc(
             "core-net",
             "ingest-net",
             "migrate-net",
-            secrets=[{"source": "aitl_migrator_password"}, {"source": "intel_svc_password"}],
+            secrets=[
+                {"source": "aitl_migrator_password"},
+                {"source": "intel_svc_password"},
+                {"source": "ingest_writer_password"},
+            ],
         ),
         "intel-service": _svc("core-net"),
         "agent-runtime": _svc("core-net", "orchestration-net"),
@@ -434,7 +447,9 @@ def test_detects_runtime_socket_outside_proxy() -> None:
 
 def test_detects_honeypot_log_volume_misuse() -> None:
     def writable_shipper(all_: dict[str, Any], _: dict[str, Any]) -> None:
-        all_["services"]["log-shipper"]["volumes"][0]["read_only"] = False
+        all_["services"]["log-shipper"]["volumes"].append(
+            {"type": "volume", "source": "honeypot-logs", "target": "/logs", "read_only": False}
+        )
 
     def other_reader(all_: dict[str, Any], _: dict[str, Any]) -> None:
         all_["services"]["intel-service"]["volumes"] = [
@@ -636,3 +651,88 @@ def test_real_compose_honeypot_covers_image_volumes(rendered_all: dict[str, Any]
     assert {compose_policy.COWRIE_ETC, compose_policy.COWRIE_VAR} <= targets
     assert honeypot["user"] == "999:999"
     assert "COWRIE" not in json.dumps(honeypot.get("environment") or {})
+
+
+# --- P3: Log Shipper boundary -----------------------------------------------------------
+
+
+def _mount(kind: str, source: str, target: str, read_only: bool = False) -> dict[str, Any]:
+    return {"type": kind, "source": source, "target": target, "read_only": read_only}
+
+
+@pytest.mark.parametrize(
+    ("change", "fragment"),
+    [
+        (lambda s: s.update(expose=["8080"]), "must not publish or expose"),
+        (lambda s: s.update(profiles=["x"]), "default profile"),
+        (lambda s: s["secrets"].append({"source": "intel_svc_password"}), "secrets"),
+        (lambda s: s.update(secrets=[]), "secrets"),
+        (lambda s: s["environment"].update(SHIPPER_MODE="live"), "SHIPPER_MODE"),
+        (lambda s: s["environment"].pop("SHIPPER_MODE"), "SHIPPER_MODE"),
+        (lambda s: s["environment"].update(AITL_DB_USER="intel_svc"), "AITL_DB_USER"),
+        (lambda s: s["environment"].update(AITL_DB_HOST="10.0.0.1"), "AITL_DB_HOST"),
+        (lambda s: s.update(depends_on={"honeypot": {}}), "depend on the honeypot"),
+        (lambda s: s.pop("healthcheck"), "health check"),
+        (lambda s: s["volumes"][0].update(read_only=False), "is not allowed"),
+        (lambda s: s["volumes"].pop(0), "required mount"),
+        (
+            lambda s: s["volumes"].__setitem__(
+                0, _mount("bind", "/etc", compose_policy.SHIPPER_SOURCE, True)
+            ),
+            "unexpected bind mount",
+        ),
+        (
+            lambda s: s["volumes"].append(_mount("volume", "honeypot-logs", "/logs", True)),
+            "is not allowed",
+        ),
+        (
+            lambda s: s["volumes"].append(
+                _mount("volume", "honeypot-logs", compose_policy.SHIPPER_SOURCE, False)
+            ),
+            "may not mount honeypot-logs read-write",
+        ),
+        (
+            lambda s: s["volumes"].append(
+                _mount("bind", "/var/run/docker.sock", "/var/run/docker.sock")
+            ),
+            "mounts the container-runtime socket",
+        ),
+        (lambda s: s["networks"].update({"honeypot-net": None}), "service log-shipper: networks"),
+        (lambda s: s["networks"].update({"core-net": None}), "service log-shipper: networks"),
+        (lambda s: s["networks"].update({"migrate-net": None}), "service log-shipper: networks"),
+        (lambda s: s["networks"].update({"sandbox-net": None}), "reachable from agent sandboxes"),
+        (lambda s: s["networks"].update({"llm-egress": None}), "service log-shipper: networks"),
+    ],
+)
+def test_detects_log_shipper_regression(change: Any, fragment: str) -> None:
+    def mutate(all_: dict[str, Any], _: dict[str, Any]) -> None:
+        change(all_["services"]["log-shipper"])
+
+    _assert_detected(_violations_after(mutate), fragment)
+
+
+@pytest.mark.parametrize("service", ["intel-service", "gateway-service", "honeypot", "dashboard"])
+def test_detects_ingest_credential_outside_shipper(service: str) -> None:
+    def mutate(all_: dict[str, Any], _: dict[str, Any]) -> None:
+        all_["services"][service]["secrets"] = [{"source": "ingest_writer_password"}]
+
+    _assert_detected(_violations_after(mutate), "receives the ingest_writer credential")
+
+
+def test_detects_shipper_state_shared() -> None:
+    def mutate(all_: dict[str, Any], _: dict[str, Any]) -> None:
+        all_["services"]["intel-service"]["volumes"] = [
+            _mount("volume", "shipper-state", "/x", True)
+        ]
+
+    _assert_detected(_violations_after(mutate), "may not mount shipper-state")
+
+
+def test_real_compose_log_shipper_is_fixture_only(rendered_default: dict[str, Any]) -> None:
+    """FR-004d: the single-host profile ingests the synthetic corpus, never live telemetry."""
+    shipper = rendered_default["services"]["log-shipper"]
+    assert shipper["environment"]["SHIPPER_MODE"] == "fixture"
+    assert not any(m.get("source") == "honeypot-logs" for m in shipper["volumes"])
+    assert not shipper.get("ports")
+    assert not shipper.get("expose")
+    assert shipper["build"]["dockerfile"] == "services/log_shipper/Dockerfile"

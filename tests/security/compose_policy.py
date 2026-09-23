@@ -80,6 +80,25 @@ COWRIE_VAR = "/cowrie/cowrie-git/var"
 COWRIE_LOG_DIR = "/cowrie/cowrie-git/var/log/cowrie"
 COWRIE_CONFIG_SOURCE_SUFFIX = "/honeypot/cowrie/etc"
 
+# Log Shipper (ARCHITECTURE.md §9; PRD FR-004b, FR-004d, FR-005b). In the
+# single-host profile it runs fixture mode only: the synthetic corpus read-only,
+# never the honeypot volume (live mode belongs to the honeypot-host profile).
+SHIPPER = "log-shipper"
+SHIPPER_SOURCE = "/srv/aitl/source"
+SHIPPER_STATE = "/srv/aitl/state"
+SHIPPER_STATE_VOLUME = "shipper-state"
+SHIPPER_CORPUS_SUFFIX = "/corpus/honeypot_sessions_v1"
+INGEST_SECRET = "ingest_writer_password"  # noqa: S105 - a secret name, not a value
+INGEST_SECRET_HOLDERS = frozenset({"db", SHIPPER})
+SHIPPER_REQUIRED_ENV: Mapping[str, str] = {
+    "SHIPPER_MODE": "fixture",
+    "SHIPPER_SOURCE_DIR": SHIPPER_SOURCE,
+    "SHIPPER_STATE_DIR": SHIPPER_STATE,
+    "AITL_DB_HOST": "db",
+    "AITL_DB_USER": "ingest_writer",
+    "AITL_DB_PASSWORD_FILE": f"/run/secrets/{INGEST_SECRET}",
+}
+
 _DIGEST_PINNED = re.compile(r"@sha256:[0-9a-f]{64}$")
 _SECRET_ENV_NAME = re.compile(r"(PASSWORD|PASSWD|SECRET|TOKEN|API_?KEY|PRIVATE_?KEY|CREDENTIAL)")
 
@@ -150,6 +169,8 @@ def check_services(
         secrets = {str(s.get("source")) for s in service.get("secrets") or []}
         if MIGRATOR_SECRET in secrets and name not in MIGRATOR_SECRET_HOLDERS:
             violations.append(f"service {name}: receives the migration credential")
+        if INGEST_SECRET in secrets and name not in INGEST_SECRET_HOLDERS:
+            violations.append(f"service {name}: receives the ingest_writer credential")
 
         if "network_mode" in service:
             violations.append(f"service {name}: network_mode bypasses the network topology")
@@ -191,6 +212,8 @@ def check_services(
                 name not in RUNTIME_SOCKET_ALLOWED
             ):
                 violations.append(f"service {name}: mounts the container-runtime socket")
+            if source == SHIPPER_STATE_VOLUME and name != SHIPPER:
+                violations.append(f"service {name}: may not mount {SHIPPER_STATE_VOLUME}")
             if source == HONEYPOT_LOG_VOLUME:
                 read_only = mount.get("read_only") is True
                 if name in HONEYPOT_LOG_WRITERS:
@@ -210,6 +233,8 @@ def check_services(
             violations.extend(_check_hardened(name, service))
         if name == "honeypot":
             violations.extend(_check_honeypot(service))
+        if name == SHIPPER:
+            violations.extend(_check_log_shipper(service))
 
         environment = service.get("environment") or {}
         for key, value in environment.items():
@@ -339,4 +364,44 @@ def _check_honeypot(service: Mapping[str, Any]) -> list[str]:
     tmpfs_targets = {str(entry).split(":", 1)[0] for entry in service.get("tmpfs") or []}
     if COWRIE_VAR not in tmpfs_targets:
         violations.append(f"service honeypot: {COWRIE_VAR} must be a bounded tmpfs")
+    return violations
+
+
+def _check_log_shipper(service: Mapping[str, Any]) -> list[str]:
+    """Portless, INSERT-only, read-only source, fixture mode in this profile."""
+    violations: list[str] = []
+    if service.get("ports") or service.get("expose"):
+        violations.append("service log-shipper: must not publish or expose any port")
+    if service.get("profiles"):
+        violations.append("service log-shipper: must run in the default profile")
+    secrets = sorted(str(s.get("source")) for s in service.get("secrets") or [])
+    if secrets != [INGEST_SECRET]:
+        violations.append(f"service log-shipper: secrets {secrets} != [{INGEST_SECRET!r}]")
+    environment = service.get("environment") or {}
+    for key, expected in SHIPPER_REQUIRED_ENV.items():
+        if environment.get(key) != expected:
+            violations.append(
+                f"service log-shipper: {key}={environment.get(key)!r} (expected {expected!r})"
+            )
+    if "honeypot" in (service.get("depends_on") or {}):
+        violations.append("service log-shipper: must not depend on the honeypot")
+    if not (service.get("healthcheck") or {}).get("test"):
+        violations.append("service log-shipper: must declare a health check")
+    allowed = {
+        ("bind", SHIPPER_SOURCE, True),
+        ("volume", SHIPPER_STATE, False),
+    }
+    mounts = set()
+    for mount in _volume_mounts(service):
+        kind = str(mount.get("type"))
+        mounts.add((kind, str(mount.get("target")), mount.get("read_only") is True))
+        source = str(mount.get("source", ""))
+        if kind == "bind" and not source.endswith(SHIPPER_CORPUS_SUFFIX):
+            violations.append(f"service log-shipper: unexpected bind mount {source}")
+        if kind == "volume" and source != SHIPPER_STATE_VOLUME:
+            violations.append(f"service log-shipper: unexpected volume {source}")
+    for extra in sorted(mounts - allowed):
+        violations.append(f"service log-shipper: mount {extra} is not allowed")
+    for missing in sorted(allowed - mounts):
+        violations.append(f"service log-shipper: required mount {missing} is missing")
     return violations

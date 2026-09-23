@@ -87,6 +87,59 @@ services:
       - /cowrie/cowrie-git/var/lib/cowrie:size=64m,mode=0700,uid=999,gid=999
       - /tmp:size=16m,mode=1777
 
+  # --- Log Shipper (ARCHITECTURE.md §9; PRD FR-004b, FR-005, FR-005b) ----------
+  # Portless: no listener, no published or exposed port. Single-host profile runs
+  # fixture mode over the version-controlled synthetic corpus (read-only); it
+  # does not mount honeypot-logs. Live mode (honeypot-logs mounted read-only)
+  # belongs to the separate honeypot-host profile (ADR-010). Only on ingest-net,
+  # where its only peer is the db; INSERT-only as ingest_writer.
+  log-shipper:
+    build:
+      context: .
+      dockerfile: services/log_shipper/Dockerfile
+    user: "65534:65534"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 64
+    environment:
+      SHIPPER_MODE: fixture
+      SHIPPER_SOURCE_DIR: /srv/aitl/source
+      SHIPPER_STATE_DIR: /srv/aitl/state
+      AITL_DB_HOST: db
+      AITL_DB_PORT: "5432"
+      AITL_DB_NAME: aitl
+      AITL_DB_USER: ingest_writer
+      AITL_DB_PASSWORD_FILE: /run/secrets/ingest_writer_password
+    secrets:
+      - ingest_writer_password
+    networks:
+      - ingest-net
+    volumes:
+      - type: bind
+        source: ./corpus/honeypot_sessions_v1
+        target: /srv/aitl/source
+        read_only: true
+      - type: volume
+        source: shipper-state
+        target: /srv/aitl/state
+    tmpfs:
+      - /tmp:size=8m,mode=1777
+    healthcheck:
+      test: ["CMD", "python", "-m", "log_shipper.health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    depends_on:
+      db:
+        condition: service_healthy
+
   # --- Ephemeral deployment jobs (not runtime services; ADR-022) ----------------
   # Runs only when invoked, exits, and is removed:
   #   docker compose --env-file deploy/versions.env run --rm db-migrate
@@ -150,6 +203,8 @@ networks:
 
 volumes:
   db-data: {}
+  # The Log Shipper's private read positions and health file; nothing else mounts it.
+  shipper-state: {}
   # One-way honeypot telemetry: written by Cowrie only, read (read-only) only by
   # the Log Shipper in live mode. Size-bounded so a flood cannot fill the host.
   honeypot-logs:

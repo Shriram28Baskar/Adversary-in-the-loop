@@ -1,0 +1,3 @@
+# Synthetic honeypot corpus: exact bytes matter (CR, NUL, invalid UTF-8 cases);
+# never normalize line endings or treat as text.
+corpus/** -text -diff
