@@ -1,0 +1,18 @@
+[project]
+name = "aitl-log-shipper"
+version = "0.1.0"
+description = "Portless one-way telemetry shipper: Cowrie JSON log (or fixture corpus) to intel_raw staging."
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "aitl-common",
+]
+
+[tool.uv.sources]
+aitl-common = { workspace = true }
+
+[build-system]
+requires = ["uv_build==0.8.17"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "log_shipper"
