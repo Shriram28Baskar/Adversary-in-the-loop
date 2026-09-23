@@ -1,0 +1,11 @@
+# Mock API dataset `directory` (public), served by mock_api.directory_lookup.
+name: directory
+kind: api_data
+columns:
+  - {name: name, type: text}
+  - {name: department, type: text}
+  - {name: mailbox, type: text}
+rows:
+  - {name: Avery Quill, department: Warehouse Planning, mailbox: avery.quill@corp.example}
+  - {name: Rowan Pike, department: Procurement, mailbox: rowan.pike@corp.example}
+  - {name: Sasha Wren, department: Finance, mailbox: sasha.wren@corp.example}

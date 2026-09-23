@@ -1,0 +1,18 @@
+# Scripted test-agent configuration v1 (PRD FR-001, FR-033a; ARCHITECTURE.md §15, §37.5).
+# agent_kind = scripted: follows the version-controlled plans, makes no model
+# calls, and is never reported as an LLM-agent evaluation. The generation and
+# limit values mirror the LLM configuration so the locked configuration has
+# the same shape for both kinds.
+agent_id: assistant_scripted
+version: 1
+agent_kind: scripted
+role: assistant
+generation: {temperature: 0, max_tokens: 2048}
+system_prompt: {prompt_id: system, version: 1}
+tool_definitions_version: tool-definitions-v1
+agent_loop_version: agent-loop-v1
+limits: {max_steps: 20, model_call_budget: 25, timeout_seconds: 120}
+scripted_plans:
+  - {template_id: T-01, version: 1}
+  - {template_id: T-02, version: 1}
+  - {template_id: T-03, version: 1}

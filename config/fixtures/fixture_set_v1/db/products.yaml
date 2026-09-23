@@ -1,0 +1,11 @@
+# Mock table `products` (public). Fabricated.
+name: products
+kind: table
+columns:
+  - {name: id, type: integer}
+  - {name: name, type: text}
+  - {name: price_cents, type: integer}
+rows:
+  - {id: 1, name: Corrugated box (large), price_cents: 240}
+  - {id: 2, name: Packing tape roll, price_cents: 180}
+  - {id: 3, name: Bubble wrap sheet, price_cents: 95}
