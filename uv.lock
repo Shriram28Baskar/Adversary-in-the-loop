@@ -5,6 +5,7 @@ requires-python = "==3.11.*"
 [manifest]
 members = [
     "aitl-common",
+    "aitl-intel-service",
     "aitl-log-shipper",
     "aitl-workspace",
 ]
@@ -31,6 +32,17 @@ requires-dist = [
 ]
 
 [[package]]
+name = "aitl-intel-service"
+version = "0.1.0"
+source = { editable = "services/intel_service" }
+dependencies = [
+    { name = "aitl-common" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "aitl-common", editable = "packages/aitl_common" }]
+
+[[package]]
 name = "aitl-log-shipper"
 version = "0.1.0"
 source = { editable = "services/log_shipper" }
@@ -49,6 +61,7 @@ source = { virtual = "." }
 [package.dev-dependencies]
 dev = [
     { name = "aitl-common" },
+    { name = "aitl-intel-service" },
     { name = "aitl-log-shipper" },
     { name = "alembic" },
     { name = "httpx" },
@@ -71,6 +84,7 @@ migrate = [
 [package.metadata.requires-dev]
 dev = [
     { name = "aitl-common", editable = "packages/aitl_common" },
+    { name = "aitl-intel-service", editable = "services/intel_service" },
     { name = "aitl-log-shipper", editable = "services/log_shipper" },
     { name = "alembic", specifier = "==1.20.0" },
     { name = "httpx", specifier = "==0.28.1" },
