@@ -249,5 +249,9 @@ def test_logs_never_contain_telemetry_content(tmp_path: Path, caplog: Any) -> No
         shipper.heartbeat(pending=False)
     rendered = "\n".join(formatter.format(r) for r in caplog.records)
     assert caplog.records
+    cycles = [json.loads(formatter.format(r)) for r in caplog.records]
+    cycles = [c for c in cycles if c.get("event") == "shipper.cycle"]
+    assert cycles
+    assert all(c.get("correlation_id") for c in cycles)  # P0 correlation primitive
     for forbidden in (marker, "root", "203.0.113.7", "a1b2c3d4e5f6", "bad"):
         assert forbidden not in rendered, forbidden

@@ -65,6 +65,12 @@ def test_image_is_pinned_hash_locked_unprivileged_and_portless() -> None:
         "packages/aitl_common/src/aitl_common",
         "services/log_shipper/src/log_shipper",
     ]
+    # The private state volume's mount point belongs to the shipper user (the
+    # runtime isolation stand-in mirrors this; tests/security/runtime_standin.py).
+    assert (
+        "mkdir -p /srv/aitl/state && chown 65534:65534 /srv/aitl/state "
+        "&& chmod 0700 /srv/aitl/state" in dockerfile
+    )
     assert re.search(r'^ENTRYPOINT \["python", "-m", "log_shipper"\]$', dockerfile, re.MULTILINE)
 
 
