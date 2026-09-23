@@ -88,6 +88,32 @@ def test_identical_shipper_quarantine_is_stored_once(
     assert _count(pg, staging_db, "quarantine_record") == 3
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        '{"preview": "{\\"eventid\\": 1}"}',  # JSON-escaped quote
+        "\\x41",  # would parse as bytea hex escape
+        "\\",
+        "\\\\",
+        "\\000",
+        "caf\u00e9 \ufffd \u202e",
+    ],
+)
+def test_quarantine_key_accepts_any_payload_and_is_exact(
+    pg: Cluster, staging_db: str, writer: psycopg.Connection[tuple[object, ...]], payload: str
+) -> None:
+    """Regression: the dedupe digest hashes the exact payload, never parsing escapes."""
+    for _ in range(2):
+        writer.execute(INSERT_QUARANTINE, ("shipper_parse", "json.invalid", payload))
+    # Payloads that would collide if backslash escapes were interpreted stay distinct.
+    writer.execute(INSERT_QUARANTINE, ("shipper_parse", "json.invalid", payload + "\\"))
+    writer.execute(INSERT_QUARANTINE, ("shipper_parse", "json.invalid", "A"))
+    assert _count(pg, staging_db, "quarantine_record") == 3
+    with pg.admin(staging_db) as conn:
+        stored = {r[0] for r in conn.execute("SELECT payload FROM intel_raw.quarantine_record")}
+    assert stored == {payload, payload + "\\", "A"}
+
+
 def test_promotion_quarantine_is_not_constrained_by_the_shipper_key(
     pg: Cluster, staging_db: str
 ) -> None:

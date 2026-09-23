@@ -67,7 +67,8 @@ class QuarantineRecord(Base):
             "ux_quarantine_record_shipper",
             "stage",
             "reason_code",
-            text("sha256(payload::text::bytea)"),
+            # Exact UTF-8 bytes of the payload (see migration 0014).
+            text(r"sha256(decode(replace(payload::text, '\', '\\'), 'escape'))"),
             unique=True,
             postgresql_where=text("raw_record_id IS NULL"),
         ),
