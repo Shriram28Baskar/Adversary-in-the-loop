@@ -449,23 +449,82 @@ def test_provenance_both_directions(pg: Cluster, corpus_db: str) -> None:
     assert back == [("exfiltration_attempt",)]
 
 
-@pytest.mark.parametrize(
-    "statement",
-    [
+ORPHAN_CASES = {
+    # (statement, constraint that must reject it) - each case has exactly one missing link.
+    "link-without-event": (
+        "INSERT INTO intel.behavior_event (behavior_id, event_id, session_id) "
+        "VALUES (%(behavior)s, gen_random_uuid(), %(session)s)",
+        "fk_behavior_event_event",
+    ),
+    "link-without-behavior": (
+        "INSERT INTO intel.behavior_event (behavior_id, event_id, session_id) "
+        "VALUES (gen_random_uuid(), %(event)s, %(session)s)",
+        "fk_behavior_event_behavior",
+    ),
+    "link-across-sessions": (
+        "INSERT INTO intel.behavior_event (behavior_id, event_id, session_id) "
+        "VALUES (%(behavior)s, %(other_event)s, %(session)s)",
+        "fk_behavior_event_event",
+    ),
+    "behavior-without-session": (
         "INSERT INTO intel.attacker_behavior (session_id, ordinal, phase, phase_rules_version, "
         "started_at, ended_at) VALUES (gen_random_uuid(), 1, 'discovery', 'phase-rules-v1', "
         "now(), now())",
-        "INSERT INTO intel.behavior_event (behavior_id, event_id, session_id) "
-        "VALUES (gen_random_uuid(), gen_random_uuid(), gen_random_uuid())",
+        "fk_attacker_behavior_session",
+    ),
+    "event-without-session": (
         "INSERT INTO intel.attack_event (session_id, raw_record_id, seq, event_type, occurred_at, "
-        "raw_text, normalized_text, truncated) VALUES (gen_random_uuid(), 1, 1, 'other', now(), "
-        "'', '', false)",
-    ],
-)
-def test_orphan_rows_are_rejected_by_foreign_keys(pg: Cluster, db: str, statement: str) -> None:
-    """A behavior, link or event without its source cannot exist (NOT NULL FKs)."""
-    with pg.connect(db, "intel_svc") as conn, pytest.raises(psycopg.errors.ForeignKeyViolation):
-        conn.execute(statement)
+        "raw_text, normalized_text, truncated) VALUES (gen_random_uuid(), %(free_raw)s, 1, "
+        "'other', now(), '', '', false)",
+        "fk_attack_event_session",
+    ),
+    "event-without-raw-record": (
+        "INSERT INTO intel.attack_event (session_id, raw_record_id, seq, event_type, occurred_at, "
+        "raw_text, normalized_text, truncated) VALUES (%(session)s, 999999999, 999, "
+        "'other', now(), '', '', false)",
+        "fk_attack_event_raw_record",
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(ORPHAN_CASES))
+def test_each_provenance_link_is_enforced_by_its_foreign_key(
+    pg: Cluster, corpus_db: str, case: str
+) -> None:
+    """A behavior, link or event without its source cannot exist; each FK is checked alone."""
+    promoter(pg, corpus_db).run()
+    ((behavior, session),) = rows(
+        pg, corpus_db, "SELECT id, session_id FROM intel.attacker_behavior ORDER BY id LIMIT 1"
+    )
+    ((event,),) = rows(
+        pg, corpus_db, "SELECT id FROM intel.attack_event WHERE session_id = %s LIMIT 1", (session,)
+    )
+    ((other_event,),) = rows(
+        pg,
+        corpus_db,
+        "SELECT id FROM intel.attack_event WHERE session_id <> %s LIMIT 1",
+        (session,),
+    )
+    ((free_raw,),) = rows(
+        pg,
+        corpus_db,
+        "SELECT min(r.id) FROM intel_raw.raw_ingest_record r WHERE r.kind = 'event' AND NOT EXISTS "
+        "(SELECT 1 FROM intel.attack_event e WHERE e.raw_record_id = r.id)",
+    )
+    statement, constraint = ORPHAN_CASES[case]
+    params = {
+        "behavior": behavior,
+        "session": session,
+        "event": event,
+        "other_event": other_event,
+        "free_raw": free_raw,
+    }
+    with (
+        pg.connect(corpus_db, "intel_svc") as conn,
+        pytest.raises(psycopg.errors.ForeignKeyViolation) as raised,
+    ):
+        conn.execute(statement, params)
+    assert raised.value.diag.constraint_name == constraint
 
 
 @pytest.mark.parametrize(
