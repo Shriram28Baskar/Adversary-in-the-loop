@@ -177,9 +177,13 @@ networks:
   # published port and used only by the honeypot isolation tests.
   honeypot-net:
     internal: true
-  # Log Shipper -> db (intel_raw staging only).
+  # Log Shipper -> db (intel_raw staging only). Fixed subnet: pg_hba.conf admits
+  # ingest_writer only from this range.
   ingest-net:
     internal: true
+    ipam:
+      config:
+        - subnet: 10.231.253.0/29
   # Core services; no honeypot access.
   core-net:
     internal: true

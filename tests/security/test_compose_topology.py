@@ -202,6 +202,7 @@ def _reference() -> tuple[dict[str, Any], dict[str, Any]]:
         for name in compose_policy.DECLARED_NETWORKS
     }
     networks["migrate-net"]["ipam"] = {"config": [{"subnet": compose_policy.MIGRATE_NET_SUBNET}]}
+    networks["ingest-net"]["ipam"] = {"config": [{"subnet": compose_policy.INGEST_NET_SUBNET}]}
     services = {
         "honeypot": _svc(
             "honeypot-net",
@@ -736,3 +737,30 @@ def test_real_compose_log_shipper_is_fixture_only(rendered_default: dict[str, An
     assert not shipper.get("ports")
     assert not shipper.get("expose")
     assert shipper["build"]["dockerfile"] == "services/log_shipper/Dockerfile"
+
+
+# --- ingest_writer source subnet (pg_hba.conf) -------------------------------------------
+
+
+@pytest.mark.parametrize("subnet", [None, "10.231.0.0/16", "0.0.0.0/0", "10.231.254.0/29"])
+def test_detects_ingest_net_subnet_drift(subnet: str | None) -> None:
+    def mutate(all_: dict[str, Any], _: dict[str, Any]) -> None:
+        if subnet is None:
+            all_["networks"]["ingest-net"].pop("ipam")
+        else:
+            all_["networks"]["ingest-net"]["ipam"] = {"config": [{"subnet": subnet}]}
+
+    _assert_detected(_violations_after(mutate), "network ingest-net: subnet")
+
+
+@pytest.mark.parametrize("service", ["intel-service", "gateway-service", "dashboard"])
+def test_detects_other_service_on_ingest_net(service: str) -> None:
+    def mutate(all_: dict[str, Any], _: dict[str, Any]) -> None:
+        all_["services"][service]["networks"]["ingest-net"] = None
+
+    _assert_detected(_violations_after(mutate), "ingest_writer pg_hba.conf source subnet")
+
+
+def test_real_compose_ingest_net_subnet(rendered_all: dict[str, Any]) -> None:
+    config = rendered_all["networks"]["ingest-net"]["ipam"]["config"]
+    assert [c["subnet"] for c in config] == [compose_policy.INGEST_NET_SUBNET]

@@ -61,6 +61,11 @@ HONEYPOT_LOG_READONLY_READERS = frozenset({"log-shipper"})
 MIGRATE_NET = "migrate-net"
 MIGRATE_NET_SUBNET = "10.231.254.0/29"
 MIGRATE_NET_MEMBERS = frozenset({"db", "db-migrate"})
+# ingest-net carries only db <-> log-shipper; pg_hba.conf admits ingest_writer only
+# from this subnet, so the subnet must be fixed and match.
+INGEST_NET = "ingest-net"
+INGEST_NET_SUBNET = "10.231.253.0/29"
+INGEST_NET_MEMBERS = frozenset({"db", "log-shipper"})
 # Only the db (to create the role) and the migration job may receive the migrator
 # credential; the owner has no credential at all (ADR-022).
 MIGRATOR_SECRET = "aitl_migrator_password"  # noqa: S105 - a secret name, not a value
@@ -156,6 +161,13 @@ def check_services(
     if MIGRATE_NET in networks and subnets != [MIGRATE_NET_SUBNET]:
         violations.append(
             f"network {MIGRATE_NET}: subnet {subnets} != {MIGRATE_NET_SUBNET} (pg_hba.conf)"
+        )
+
+    ingest = networks.get(INGEST_NET) or {}
+    ingest_subnets = [c.get("subnet") for c in (ingest.get("ipam") or {}).get("config") or []]
+    if INGEST_NET in networks and ingest_subnets != [INGEST_NET_SUBNET]:
+        violations.append(
+            f"network {INGEST_NET}: subnet {ingest_subnets} != {INGEST_NET_SUBNET} (pg_hba.conf)"
         )
 
     sandbox_net_members: set[str] = set()
@@ -257,6 +269,15 @@ def check_services(
         violations.append(
             f"{MIGRATE_NET}: {sorted(migrate_members - MIGRATE_NET_MEMBERS)} could reach the "
             "migrator's pg_hba.conf source subnet"
+        )
+
+    ingest_members = {
+        name for name, svc in services.items() if INGEST_NET in (svc.get("networks") or {})
+    }
+    if ingest_members - INGEST_NET_MEMBERS:
+        violations.append(
+            f"{INGEST_NET}: {sorted(ingest_members - INGEST_NET_MEMBERS)} could reach the "
+            "ingest_writer pg_hba.conf source subnet"
         )
 
     unexpected_peers = sandbox_net_members - SANDBOX_NET_PEERS

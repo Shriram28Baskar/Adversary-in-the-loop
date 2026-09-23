@@ -39,7 +39,7 @@ from tests.pg_harness import (
     _psql,
     _server_bindir,
 )
-from tests.security.compose_policy import MIGRATE_NET_SUBNET
+from tests.security.compose_policy import INGEST_NET_SUBNET, MIGRATE_NET_SUBNET
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PG_HBA = REPO_ROOT / "deploy" / "postgres" / "pg_hba.conf"
@@ -50,6 +50,8 @@ COMPOSE = REPO_ROOT / "docker-compose.yml"
 MIGRATE_DOCKERFILE = REPO_ROOT / "deploy" / "migrate" / "Dockerfile"
 MIGRATE_REQUIREMENTS = REPO_ROOT / "deploy" / "migrate" / "requirements.txt"
 LOGIN_ROLES = (*RUNTIME_ROLES, MIGRATOR_ROLE)
+INGEST_ROLE = "ingest_writer"
+ANYWHERE_ROLES = tuple(r for r in RUNTIME_ROLES if r != INGEST_ROLE)
 HBA_REJECT = re.escape("pg_hba.conf rejects connection")
 
 
@@ -74,19 +76,35 @@ def test_hba_superuser_is_local_peer_only() -> None:
     assert superuser_rules == [["local", "all", "postgres", "peer"]]
 
 
-def test_hba_network_access_is_runtime_roles_and_subnet_bound_migrator_only() -> None:
+def test_hba_network_access_is_runtime_roles_and_subnet_bound_ingest_and_migrator() -> None:
     host_rules = [r for r in _hba_rules() if r[0].startswith("host")]
     allowed = [r for r in host_rules if r[-1] != "reject"]
     assert allowed == [
-        ["host", "aitl", ",".join(RUNTIME_ROLES), "all", "scram-sha-256"],
+        ["host", "aitl", ",".join(ANYWHERE_ROLES), "all", "scram-sha-256"],
+        ["host", "aitl", INGEST_ROLE, INGEST_NET_SUBNET, "scram-sha-256"],
         ["host", "aitl", MIGRATOR_ROLE, MIGRATE_NET_SUBNET, "scram-sha-256"],
     ]
     assert host_rules[-1] == ["host", "all", "all", "all", "reject"]
 
 
+def test_hba_admits_ingest_writer_only_from_its_subnet() -> None:
+    """ingest_writer appears in exactly one accepting rule, bound to ingest-net."""
+    rules = [r for r in _hba_rules() if r[-1] != "reject"]
+    ingest = [r for r in rules if INGEST_ROLE in r[2].split(",") or r[2] == "all"]
+    assert ingest == [["host", "aitl", INGEST_ROLE, INGEST_NET_SUBNET, "scram-sha-256"]]
+
+
 def test_hba_migrator_subnet_matches_compose_migrate_net() -> None:
     """pg_hba.conf and docker-compose.yml must name the same migrate-net subnet."""
     assert f"subnet: {MIGRATE_NET_SUBNET}" in COMPOSE.read_text()
+
+
+def test_hba_ingest_subnet_matches_compose_ingest_net() -> None:
+    """pg_hba.conf and docker-compose.yml must name the same ingest-net subnet."""
+    compose = COMPOSE.read_text()
+    ingest_block = compose.split("  ingest-net:", 1)[1].split("\n  core-net:", 1)[0]
+    assert f"subnet: {INGEST_NET_SUBNET}" in ingest_block
+    assert INGEST_NET_SUBNET != MIGRATE_NET_SUBNET
 
 
 def test_hba_loads_in_real_postgres() -> None:
@@ -327,8 +345,9 @@ def _tcp(port: int, user: str, password: str, dbname: str = "aitl") -> str:
 
 def test_repo_hba_enforced_over_tcp() -> None:
     with _server_with_repo_hba() as (data, port, passwords, hba):
-        # Runtime roles: admitted with their SCRAM password, to aitl only.
-        for role in RUNTIME_ROLES:
+        # Runtime roles other than ingest_writer: admitted with their SCRAM
+        # password from any source, to aitl only.
+        for role in ANYWHERE_ROLES:
             with psycopg.connect(_tcp(port, role, passwords[role])) as conn:
                 assert conn.execute("SELECT current_user").fetchone() == (role,)
         with pytest.raises(psycopg.OperationalError, match="password authentication failed"):
@@ -345,9 +364,26 @@ def test_repo_hba_enforced_over_tcp() -> None:
         with pytest.raises(psycopg.OperationalError, match=HBA_REJECT):
             psycopg.connect(_tcp(port, "postgres", passwords[RUNTIME_ROLES[0]]))
 
+        # ingest_writer's correct password is refused from outside ingest-net.
+        with pytest.raises(psycopg.OperationalError, match=HBA_REJECT):
+            psycopg.connect(_tcp(port, INGEST_ROLE, passwords[INGEST_ROLE]))
+
         # Control: the only thing refusing the migrator is its source address.
         # Point the migrator rule at 127.0.0.1/32 and it is admitted.
         hba.write_text(PG_HBA.read_text().replace(MIGRATE_NET_SUBNET, "127.0.0.1/32"))
         _pg_reload(data)
         with psycopg.connect(_tcp(port, MIGRATOR_ROLE, passwords[MIGRATOR_ROLE])) as conn:
             assert conn.execute("SELECT current_user").fetchone() == (MIGRATOR_ROLE,)
+        with pytest.raises(psycopg.OperationalError, match=HBA_REJECT):
+            psycopg.connect(_tcp(port, INGEST_ROLE, passwords[INGEST_ROLE]))
+
+        # Control: likewise for ingest_writer - its source address alone refuses
+        # it; from an admitted source the password is still required.
+        hba.write_text(PG_HBA.read_text().replace(INGEST_NET_SUBNET, "127.0.0.1/32"))
+        _pg_reload(data)
+        with psycopg.connect(_tcp(port, INGEST_ROLE, passwords[INGEST_ROLE])) as conn:
+            assert conn.execute("SELECT current_user").fetchone() == (INGEST_ROLE,)
+        with pytest.raises(psycopg.OperationalError, match="password authentication failed"):
+            psycopg.connect(_tcp(port, INGEST_ROLE, passwords["intel_svc"]))
+        with pytest.raises(psycopg.OperationalError, match=HBA_REJECT):
+            psycopg.connect(_tcp(port, MIGRATOR_ROLE, passwords[MIGRATOR_ROLE]))

@@ -142,6 +142,11 @@ def test_promotion_quarantine_is_not_constrained_by_the_shipper_key(
         "UPDATE intel_raw.raw_ingest_record SET source_ref = 'x'",
         "DELETE FROM intel_raw.raw_ingest_record",
         "TRUNCATE intel_raw.raw_ingest_record",
+        "UPDATE intel_raw.quarantine_record SET reason_code = 'x'",
+        "DELETE FROM intel_raw.quarantine_record",
+        "TRUNCATE intel_raw.quarantine_record",
+        "INSERT INTO intel_raw.quarantine_record (stage, reason_code, payload) "
+        "VALUES ('shipper_parse', 'json.invalid', 'p') RETURNING id",
         "SELECT count(*) FROM intel.attack_session",
         "SELECT count(*) FROM agent.data_asset",
         "SELECT count(*) FROM security.policy",
