@@ -32,6 +32,7 @@ __all__ = [
 ]
 
 OWNER_ROLE = "aitl_owner"
+MIGRATOR_ROLE = "aitl_migrator"  # deployment-only role (ADR-022); never a runtime identity
 RUNTIME_ROLES = frozenset(
     {"ingest_writer", "intel_svc", "scenario_gen", "agent_svc", "gateway_svc", "eval_svc"}
 )
@@ -98,13 +99,14 @@ def verify_runtime_identity(engine: Engine, expected_role: str) -> None:
             text(
                 "SELECT session_user, current_user, r.rolsuper, r.rolcreaterole, r.rolcreatedb, "
                 "r.rolbypassrls, r.rolreplication, "
-                "pg_has_role(session_user, :owner, 'MEMBER') AS owner_member "
+                "pg_has_role(session_user, :owner, 'MEMBER') AS owner_member, "
+                "pg_has_role(session_user, :migrator, 'MEMBER') AS migrator_member "
                 "FROM pg_roles r WHERE r.rolname = session_user"
             ),
-            {"owner": OWNER_ROLE},
+            {"owner": OWNER_ROLE, "migrator": MIGRATOR_ROLE},
         ).one()
-    session_user, current_user, *elevated, owner_member = row
+    session_user, current_user, *elevated, owner_member, migrator_member = row
     if session_user != expected_role or current_user != expected_role:
         raise RuntimeIdentityError(f"connected as {session_user!r}, expected {expected_role!r}")
-    if any(elevated) or owner_member:
+    if any(elevated) or owner_member or migrator_member:
         raise RuntimeIdentityError(f"role {expected_role!r} has elevated privileges")

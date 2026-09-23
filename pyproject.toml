@@ -25,9 +25,14 @@ dev = [
     "httpx==0.28.1",
     "pyyaml==6.0.3",
     "types-pyyaml==6.0.12.20260906",
-    # Migration tooling: run only by the migration job with admin credentials,
-    # never by a runtime service (ARCHITECTURE.md §24).
+    {include-group = "migrate"},
+]
+# The ephemeral migration job's complete dependency set (ADR-022). Exported with
+# hashes to deploy/migrate/requirements.txt; never installed in a runtime service.
+migrate = [
     "alembic==1.20.0",
+    "sqlalchemy==2.0.54",
+    "psycopg[binary]==3.3.6",
 ]
 
 [tool.ruff]

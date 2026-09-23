@@ -32,9 +32,11 @@ services:
       - agent_svc_password
       - gateway_svc_password
       - eval_svc_password
+      - aitl_migrator_password
     networks:
       - core-net
       - ingest-net
+      - migrate-net
     volumes:
       - db-data:/var/lib/postgresql/data
       - ./deploy/postgres/pg_hba.conf:/etc/aitl/pg_hba.conf:ro
@@ -45,6 +47,38 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
+
+  # --- Ephemeral deployment jobs (not runtime services; ADR-022) ----------------
+  # Runs only when invoked, exits, and is removed:
+  #   docker compose --env-file deploy/versions.env run --rm db-migrate
+  # Never started by `up` (non-default profile), no ports, no listener, only on
+  # migrate-net, and the only holder of the migrator credential.
+  db-migrate:
+    profiles: ["deploy-jobs"]
+    build:
+      context: .
+      dockerfile: deploy/migrate/Dockerfile
+    restart: "no"
+    read_only: true
+    user: "65534:65534"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      AITL_DB_HOST: db
+      AITL_DB_PORT: "5432"
+      AITL_DB_NAME: aitl
+      AITL_MIGRATION_USER: aitl_migrator
+      AITL_MIGRATION_PASSWORD_FILE: /run/secrets/aitl_migrator_password
+      AITL_MIGRATION_WAIT_SECONDS: "60"
+    secrets:
+      - aitl_migrator_password
+    networks:
+      - migrate-net
+    depends_on:
+      db:
+        condition: service_healthy
 
 networks:
   # Attacker-facing; in the single-host profile it is internal with no
@@ -67,6 +101,13 @@ networks:
   llm-egress: {}
   # Operator browser access to the dashboard, published on 127.0.0.1 only.
   operator-net: {}
+  # db <-> ephemeral db-migrate job only (ADR-022). Fixed subnet: pg_hba.conf
+  # admits aitl_migrator only from this range.
+  migrate-net:
+    internal: true
+    ipam:
+      config:
+        - subnet: 10.231.254.0/29
 
 volumes:
   db-data: {}
@@ -86,3 +127,5 @@ secrets:
     file: deploy/secrets/generated/gateway_svc_password
   eval_svc_password:
     file: deploy/secrets/generated/eval_svc_password
+  aitl_migrator_password:
+    file: deploy/secrets/generated/aitl_migrator_password

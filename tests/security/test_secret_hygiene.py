@@ -122,12 +122,19 @@ def generator(tmp_path: Path) -> Path:
 
 
 def test_generate_creates_owner_only_strong_secrets(generator: Path) -> None:
+    """The 0700 directory is the host access boundary.
+
+    Non-swarm Compose bind-mounts file secrets with their host mode, and the
+    consumers read them as non-root (postgres after gosu; db-migrate as 65534),
+    so the files themselves are 0644 and never group/world-writable.
+    """
     result = _run_generate(generator)
     assert result.returncode == 0, result.stderr
     out_dir = generator / "generated"
     assert stat.S_IMODE(out_dir.stat().st_mode) == 0o700
     secret = out_dir / "postgres_superuser_password"
-    assert stat.S_IMODE(secret.stat().st_mode) == 0o600
+    assert stat.S_IMODE(secret.stat().st_mode) == 0o644
+    assert {p.name for p in out_dir.iterdir()} >= {"aitl_migrator_password"}
     value = secret.read_text().strip()
     assert len(value) >= 32
     assert re.fullmatch(r"[A-Za-z0-9_\-]+", value)

@@ -37,6 +37,7 @@ INIT_ROLES_SQL = REPO_ROOT / "deploy" / "postgres" / "init-roles.sql"
 ALEMBIC_INI = REPO_ROOT / "migrations" / "alembic.ini"
 
 OWNER_ROLE = "aitl_owner"
+MIGRATOR_ROLE = "aitl_migrator"
 RUNTIME_ROLES = (
     "ingest_writer",
     "intel_svc",
@@ -119,7 +120,7 @@ class Cluster:
     def init_roles(self, dbname: str) -> None:
         """Run deploy/postgres/init-roles.sql exactly as a deployment would."""
         args = [_psql(), "-X", "-q", "-v", "ON_ERROR_STOP=1", "-v", f"dbname={dbname}"]
-        for role in RUNTIME_ROLES:
+        for role in (*RUNTIME_ROLES, MIGRATOR_ROLE):
             args += ["-v", f"{role}_password={self.passwords[role]}"]
         args += ["-f", str(INIT_ROLES_SQL), self.admin_conninfo(dbname)]
         subprocess.run(args, check=True, capture_output=True, text=True)
@@ -220,7 +221,7 @@ def _local_cluster() -> Iterator[Cluster]:
 @contextmanager
 def cluster() -> Iterator[Cluster]:
     """Yield a disposable cluster with random passwords for every runtime role."""
-    passwords = {role: secrets.token_urlsafe(32) for role in RUNTIME_ROLES}
+    passwords = {role: secrets.token_urlsafe(32) for role in (*RUNTIME_ROLES, MIGRATOR_ROLE)}
     dsn = os.environ.get("AITL_TEST_PG_ADMIN_DSN")
     if dsn:
         params = psycopg.conninfo.conninfo_to_dict(dsn)

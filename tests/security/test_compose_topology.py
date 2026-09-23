@@ -114,6 +114,26 @@ def test_real_compose_requires_pinned_versions_file() -> None:
     assert "POSTGRES_IMAGE" in result.stderr
 
 
+def test_real_compose_migration_job_is_not_a_runtime_service(
+    rendered_default: dict[str, Any], rendered_all: dict[str, Any]
+) -> None:
+    """ADR-022: db-migrate exists only under its profile and is never started by `up`."""
+    assert "db-migrate" not in rendered_default["services"]
+    job = rendered_all["services"]["db-migrate"]
+    assert job["profiles"] == ["deploy-jobs"]
+    assert set(job["networks"]) == {"migrate-net"}
+    assert not job.get("ports")
+    assert not job.get("expose")
+    assert job["restart"] == "no"
+
+
+def test_real_compose_migrate_net_is_db_and_job_only(rendered_all: dict[str, Any]) -> None:
+    members = {n for n, s in rendered_all["services"].items() if "migrate-net" in s["networks"]}
+    assert members == {"db", "db-migrate"}
+    subnet = rendered_all["networks"]["migrate-net"]["ipam"]["config"][0]["subnet"]
+    assert subnet == compose_policy.MIGRATE_NET_SUBNET
+
+
 def test_real_compose_uses_file_secrets_for_db(rendered_all: dict[str, Any]) -> None:
     db = rendered_all["services"]["db"]
     assert db["environment"]["POSTGRES_PASSWORD_FILE"].startswith("/run/secrets/")
@@ -133,10 +153,11 @@ def _svc(*networks: str, **extra: Any) -> dict[str, Any]:
 
 def _reference() -> tuple[dict[str, Any], dict[str, Any]]:
     """The full ARCHITECTURE.md §28 single-host topology in rendered form."""
-    networks = {
+    networks: dict[str, Any] = {
         name: {"name": f"aitl_{name}", "internal": name in compose_policy.INTERNAL_NETWORKS}
         for name in compose_policy.DECLARED_NETWORKS
     }
+    networks["migrate-net"]["ipam"] = {"config": [{"subnet": compose_policy.MIGRATE_NET_SUBNET}]}
     services = {
         "honeypot": _svc(
             "honeypot-net",
@@ -155,7 +176,12 @@ def _reference() -> tuple[dict[str, Any], dict[str, Any]]:
             ],
             environment={"INGEST_PASSWORD_FILE": "/run/secrets/ingest_writer_password"},
         ),
-        "db": _svc("core-net", "ingest-net"),
+        "db": _svc(
+            "core-net",
+            "ingest-net",
+            "migrate-net",
+            secrets=[{"source": "aitl_migrator_password"}, {"source": "intel_svc_password"}],
+        ),
         "intel-service": _svc("core-net"),
         "agent-runtime": _svc("core-net", "orchestration-net"),
         "gateway-service": _svc("core-net", "sandbox-net", "llm-egress"),
@@ -184,10 +210,22 @@ def _reference() -> tuple[dict[str, Any], dict[str, Any]]:
                 }
             ],
         ),
+        "db-migrate": {
+            "build": {"context": ".", "dockerfile": "deploy/migrate/Dockerfile"},
+            "profiles": ["deploy-jobs"],
+            "networks": {"migrate-net": None},
+            "restart": "no",
+            "read_only": True,
+            "user": "65534:65534",
+            "cap_drop": ["ALL"],
+            "security_opt": ["no-new-privileges:true"],
+            "secrets": [{"source": "aitl_migrator_password"}],
+            "environment": {"AITL_MIGRATION_PASSWORD_FILE": "/run/secrets/aitl_migrator_password"},
+        },
     }
     rendered_all = {"services": services, "networks": networks}
     rendered_default = {
-        "services": {k: v for k, v in services.items() if k != "honeypot"},
+        "services": {k: v for k, v in services.items() if k not in ("honeypot", "db-migrate")},
         "networks": networks,
     }
     return rendered_all, rendered_default
@@ -355,3 +393,80 @@ def test_detects_inline_secret_environment(key: str) -> None:
         all_["services"]["gateway-service"]["environment"] = {key: "hunter2-literal-value"}
 
     _assert_detected(_violations_after(mutate), f"secret-like variable {key}")
+
+
+# --- Deployment job rules (ADR-022) -------------------------------------------------
+
+
+@pytest.mark.parametrize("network", ["sandbox-net", "core-net", "llm-egress", "operator-net"])
+def test_detects_migration_job_on_other_network(network: str) -> None:
+    def mutate(all_: dict[str, Any], _: dict[str, Any]) -> None:
+        all_["services"]["db-migrate"]["networks"][network] = None
+
+    _assert_detected(_violations_after(mutate), "service db-migrate: networks")
+
+
+def test_detects_migration_job_reachable_from_sandbox() -> None:
+    def mutate(all_: dict[str, Any], _: dict[str, Any]) -> None:
+        all_["services"]["db-migrate"]["networks"]["sandbox-net"] = None
+
+    _assert_detected(_violations_after(mutate), "would be reachable from agent sandboxes")
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "fragment"),
+    [
+        ("ports", [{"target": 8080, "published": "8080", "host_ip": "127.0.0.1"}], "port"),
+        ("expose", ["8080"], "must not publish or expose"),
+        ("restart", "unless-stopped", "restart must be 'no'"),
+        ("restart", "always", "restart must be 'no'"),
+        ("read_only", False, "read-only"),
+        ("cap_drop", [], "drop all capabilities"),
+        ("security_opt", [], "no-new-privileges"),
+        ("user", "0:0", "non-root"),
+    ],
+)
+def test_detects_migration_job_hardening_violation(key: str, value: Any, fragment: str) -> None:
+    def mutate(all_: dict[str, Any], _: dict[str, Any]) -> None:
+        all_["services"]["db-migrate"][key] = value
+
+    _assert_detected(_violations_after(mutate), fragment)
+
+
+def test_detects_migration_job_started_by_default() -> None:
+    def mutate(all_: dict[str, Any], default: dict[str, Any]) -> None:
+        del all_["services"]["db-migrate"]["profiles"]
+        default["services"]["db-migrate"] = all_["services"]["db-migrate"]
+
+    violations = _violations_after(mutate)
+    _assert_detected(violations, "job db-migrate: must be behind a non-default profile")
+    _assert_detected(violations, "job db-migrate: starts by default")
+
+
+@pytest.mark.parametrize("service", ["intel-service", "gateway-service", "agent-runtime"])
+def test_detects_runtime_service_on_migrate_net(service: str) -> None:
+    def mutate(all_: dict[str, Any], _: dict[str, Any]) -> None:
+        all_["services"][service]["networks"]["migrate-net"] = None
+
+    violations = _violations_after(mutate)
+    _assert_detected(violations, "could reach the migrator's pg_hba.conf source subnet")
+    _assert_detected(violations, f"service {service}: networks")
+
+
+@pytest.mark.parametrize("service", ["intel-service", "gateway-service", "eval-service"])
+def test_detects_runtime_service_given_migration_credential(service: str) -> None:
+    def mutate(all_: dict[str, Any], _: dict[str, Any]) -> None:
+        all_["services"][service]["secrets"] = [{"source": "aitl_migrator_password"}]
+
+    _assert_detected(_violations_after(mutate), f"service {service}: receives the migration")
+
+
+@pytest.mark.parametrize("subnet", [None, "10.231.0.0/16", "0.0.0.0/0"])
+def test_detects_migrate_net_subnet_drift(subnet: str | None) -> None:
+    def mutate(all_: dict[str, Any], _: dict[str, Any]) -> None:
+        if subnet is None:
+            del all_["networks"]["migrate-net"]["ipam"]
+        else:
+            all_["networks"]["migrate-net"]["ipam"]["config"][0]["subnet"] = subnet
+
+    _assert_detected(_violations_after(mutate), "network migrate-net: subnet")

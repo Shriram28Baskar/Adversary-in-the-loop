@@ -21,7 +21,7 @@ from typing import Any
 EXPECTED_SERVICE_NETWORKS: Mapping[str, frozenset[str]] = {
     "honeypot": frozenset({"honeypot-net"}),
     "log-shipper": frozenset({"ingest-net"}),
-    "db": frozenset({"core-net", "ingest-net"}),
+    "db": frozenset({"core-net", "ingest-net", "migrate-net"}),
     "intel-service": frozenset({"core-net"}),
     "agent-runtime": frozenset({"core-net", "orchestration-net"}),
     "gateway-service": frozenset({"core-net", "sandbox-net", "llm-egress"}),
@@ -30,8 +30,14 @@ EXPECTED_SERVICE_NETWORKS: Mapping[str, frozenset[str]] = {
     "container-api-proxy": frozenset({"orchestration-net"}),
 }
 
+# Ephemeral deployment jobs (ADR-022): not runtime services. Each runs once via
+# `docker compose run --rm`, behind a non-default profile, and exits.
+EXPECTED_JOB_NETWORKS: Mapping[str, frozenset[str]] = {
+    "db-migrate": frozenset({"migrate-net"}),
+}
+
 INTERNAL_NETWORKS = frozenset(
-    {"honeypot-net", "ingest-net", "core-net", "sandbox-net", "orchestration-net"}
+    {"honeypot-net", "ingest-net", "core-net", "sandbox-net", "orchestration-net", "migrate-net"}
 )
 OUTBOUND_NETWORKS = frozenset({"llm-egress", "operator-net"})
 DECLARED_NETWORKS = INTERNAL_NETWORKS | OUTBOUND_NETWORKS
@@ -49,6 +55,16 @@ RUNTIME_SOCKET_ALLOWED = frozenset({"container-api-proxy"})
 HONEYPOT_LOG_VOLUME = "honeypot-logs"
 HONEYPOT_LOG_WRITERS = frozenset({"honeypot"})
 HONEYPOT_LOG_READONLY_READERS = frozenset({"log-shipper"})
+
+# migrate-net carries only db <-> db-migrate; pg_hba.conf admits aitl_migrator only
+# from this subnet, so the subnet must be fixed and match (ADR-022).
+MIGRATE_NET = "migrate-net"
+MIGRATE_NET_SUBNET = "10.231.254.0/29"
+MIGRATE_NET_MEMBERS = frozenset({"db", "db-migrate"})
+# Only the db (to create the role) and the migration job may receive the migrator
+# credential; the owner has no credential at all (ADR-022).
+MIGRATOR_SECRET = "aitl_migrator_password"  # noqa: S105 - a secret name, not a value
+MIGRATOR_SECRET_HOLDERS = frozenset({"db", "db-migrate"})
 
 _DIGEST_PINNED = re.compile(r"@sha256:[0-9a-f]{64}$")
 _SECRET_ENV_NAME = re.compile(r"(PASSWORD|PASSWD|SECRET|TOKEN|API_?KEY|PRIVATE_?KEY|CREDENTIAL)")
@@ -102,12 +118,24 @@ def check_services(
         if network.get("external"):
             violations.append(f"network {name}: external networks cannot be verified")
 
+    migrate = networks.get(MIGRATE_NET) or {}
+    subnets = [c.get("subnet") for c in (migrate.get("ipam") or {}).get("config") or []]
+    if MIGRATE_NET in networks and subnets != [MIGRATE_NET_SUBNET]:
+        violations.append(
+            f"network {MIGRATE_NET}: subnet {subnets} != {MIGRATE_NET_SUBNET} (pg_hba.conf)"
+        )
+
     sandbox_net_members: set[str] = set()
     for name, service in services.items():
-        expected = EXPECTED_SERVICE_NETWORKS.get(name)
+        expected = EXPECTED_SERVICE_NETWORKS.get(name) or EXPECTED_JOB_NETWORKS.get(name)
         if expected is None:
             violations.append(f"service {name}: not part of the ARCHITECTURE.md §28 topology")
             continue
+        if name in EXPECTED_JOB_NETWORKS:
+            violations.extend(_check_deployment_job(name, service, default_services))
+        secrets = {str(s.get("source")) for s in service.get("secrets") or []}
+        if MIGRATOR_SECRET in secrets and name not in MIGRATOR_SECRET_HOLDERS:
+            violations.append(f"service {name}: receives the migration credential")
 
         if "network_mode" in service:
             violations.append(f"service {name}: network_mode bypasses the network topology")
@@ -172,9 +200,43 @@ def check_services(
                     f"service {name}: secret-like variable {key} set inline (use a *_FILE secret)"
                 )
 
+    migrate_members = {
+        name for name, svc in services.items() if MIGRATE_NET in (svc.get("networks") or {})
+    }
+    if migrate_members - MIGRATE_NET_MEMBERS:
+        violations.append(
+            f"{MIGRATE_NET}: {sorted(migrate_members - MIGRATE_NET_MEMBERS)} could reach the "
+            "migrator's pg_hba.conf source subnet"
+        )
+
     unexpected_peers = sandbox_net_members - SANDBOX_NET_PEERS
     if unexpected_peers:
         violations.append(
             f"sandbox-net: {sorted(unexpected_peers)} would be reachable from agent sandboxes"
         )
+    return violations
+
+
+def _check_deployment_job(
+    name: str, service: Mapping[str, Any], default_services: set[str]
+) -> list[str]:
+    """ADR-022: a deployment job is ephemeral, never a long-running or listening service."""
+    violations: list[str] = []
+    if not service.get("profiles"):
+        violations.append(f"job {name}: must be behind a non-default profile")
+    if name in default_services:
+        violations.append(f"job {name}: starts by default (must run only via `run --rm`)")
+    if service.get("restart", "no") != "no":
+        violations.append(f"job {name}: restart must be 'no' (a job may not stay running)")
+    if service.get("ports") or service.get("expose"):
+        violations.append(f"job {name}: must not publish or expose any port")
+    if service.get("read_only") is not True:
+        violations.append(f"job {name}: root filesystem must be read-only")
+    if "ALL" not in (service.get("cap_drop") or []):
+        violations.append(f"job {name}: must drop all capabilities")
+    if "no-new-privileges:true" not in (service.get("security_opt") or []):
+        violations.append(f"job {name}: must set no-new-privileges")
+    user = str(service.get("user") or "")
+    if user.split(":")[0] in ("", "0", "root"):
+        violations.append(f"job {name}: must run as a non-root user")
     return violations

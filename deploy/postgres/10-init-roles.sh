@@ -1,6 +1,6 @@
 #!/bin/sh
 # First-initialization hook for the db container (/docker-entrypoint-initdb.d).
-# Creates the owner and runtime roles with passwords read from the per-role
+# Creates the owner, runtime and migrator roles with passwords read from the per-role
 # Compose secrets (deploy/secrets/generate.sh), via deploy/postgres/init-roles.sql.
 # Runs only when the data directory is first created.
 set -eu
@@ -17,4 +17,5 @@ psql -X -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
   -v agent_svc_password="$(secret agent_svc)" \
   -v gateway_svc_password="$(secret gateway_svc)" \
   -v eval_svc_password="$(secret eval_svc)" \
+  -v aitl_migrator_password="$(secret aitl_migrator)" \
   -f /etc/aitl/init-roles.sql

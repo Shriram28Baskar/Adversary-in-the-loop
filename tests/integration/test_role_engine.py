@@ -18,7 +18,7 @@ from aitl_common.db.engine import (
     RuntimeIdentityError,
     create_role_engine,
 )
-from tests.pg_harness import OWNER_ROLE, RUNTIME_ROLES, Cluster
+from tests.pg_harness import MIGRATOR_ROLE, OWNER_ROLE, RUNTIME_ROLES, Cluster
 
 
 def _settings(pg: Cluster, db: str, user: str, password: str) -> DatabaseSettings:
@@ -37,7 +37,7 @@ def test_configured_user_must_equal_expected_role(pg: Cluster, migrated_db: str)
         create_role_engine("gateway_svc", settings)
 
 
-@pytest.mark.parametrize("identity", [OWNER_ROLE, "postgres", "aitl_admin"])
+@pytest.mark.parametrize("identity", [OWNER_ROLE, MIGRATOR_ROLE, "postgres", "aitl_admin"])
 def test_owner_and_admin_identities_refused(pg: Cluster, migrated_db: str, identity: str) -> None:
     with pytest.raises(RuntimeIdentityError, match="not a runtime role"):
         create_role_engine(identity, _settings(pg, migrated_db, identity, "irrelevant"))
@@ -98,11 +98,26 @@ def test_missing_setting_refused() -> None:
         DatabaseSettings.from_env({})
 
 
-def test_no_service_receives_owner_or_migration_credentials() -> None:
+# Ephemeral deployment jobs (ADR-022) are not runtime services; the db receives
+# the migrator password only to create the role on first initialization.
+DEPLOYMENT_JOBS = frozenset({"db-migrate"})
+MIGRATOR_SECRET = "aitl_migrator_password"  # noqa: S105 - a secret name, not a value
+
+
+def _secret_names(service: dict[str, object]) -> list[str]:
+    names = []
+    for entry in service.get("secrets") or []:  # type: ignore[attr-defined]
+        names.append(str(entry["source"] if isinstance(entry, dict) else entry))
+    return names
+
+
+def test_no_runtime_service_receives_owner_or_migration_credentials() -> None:
     """What services are actually given (environment, secrets, commands), not comments."""
     repo = Path(__file__).resolve().parents[2]
     compose = yaml.safe_load((repo / "docker-compose.yml").read_text())
-    for name, service in compose["services"].items():
+    runtime = {n: s for n, s in compose["services"].items() if n not in DEPLOYMENT_JOBS}
+    assert runtime, "no runtime services found"
+    for name, service in runtime.items():
         environment = service.get("environment") or {}
         items = (
             environment.items()
@@ -110,8 +125,23 @@ def test_no_service_receives_owner_or_migration_credentials() -> None:
             else [tuple(str(entry).split("=", 1)) for entry in environment]
         )
         for key, value in items:
-            assert "MIGRATION" not in str(key).upper(), f"{name}: {key}"
+            assert "MIGRAT" not in str(key).upper(), f"{name}: {key}"
             assert OWNER_ROLE not in str(value), f"{name}: {key}"
-        secrets = [str(s) for s in service.get("secrets") or []]
-        assert not any("owner" in s or "migration" in s for s in secrets), name
-        assert OWNER_ROLE not in " ".join(str(c) for c in service.get("command") or []), name
+            assert MIGRATOR_ROLE not in str(value), f"{name}: {key}"
+        secrets = _secret_names(service)
+        assert not any("owner" in s for s in secrets), name
+        if name != "db":
+            assert not any("migrat" in s for s in secrets), name
+        command = " ".join(str(c) for c in service.get("command") or [])
+        assert OWNER_ROLE not in command, name
+        assert MIGRATOR_ROLE not in command, name
+
+
+def test_migration_job_receives_only_the_migrator_credential() -> None:
+    repo = Path(__file__).resolve().parents[2]
+    compose = yaml.safe_load((repo / "docker-compose.yml").read_text())
+    job = compose["services"]["db-migrate"]
+    assert _secret_names(job) == [MIGRATOR_SECRET]
+    assert job["environment"]["AITL_MIGRATION_USER"] == MIGRATOR_ROLE
+    assert job["environment"]["AITL_MIGRATION_PASSWORD_FILE"] == f"/run/secrets/{MIGRATOR_SECRET}"
+    assert not any("PASSWORD" in k and not k.endswith("_FILE") for k in job["environment"])
