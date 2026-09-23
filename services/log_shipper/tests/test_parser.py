@@ -287,3 +287,13 @@ def test_reasons_never_contain_content() -> None:
     ]
     for raw in samples:
         assert marker not in rejected(raw).reason
+
+
+def test_accepted_exposes_parsed_fields_read_only() -> None:
+    """P4 re-validates staged lines with this parser and reads the fields it parsed."""
+    result = parse_line(line(input="uname -a"))
+    assert isinstance(result, Accepted)
+    assert result.fields["input"] == "uname -a"
+    assert result.fields["session"] == result.session
+    with pytest.raises(TypeError):
+        result.fields["input"] = "rm -rf /"  # type: ignore[index]
