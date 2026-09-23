@@ -10,20 +10,24 @@ One run (ADR-024):
    ``attack_event`` nor by a ``promotion``-stage quarantine row - in
    ``raw_record_id`` order, re-validating each payload with the shared strict
    parser (CLAUDE.md Security Principle 19). Only (id, session key, is-close)
-   is kept per row; the scan is bounded (``max_unhandled_events``) and fails
-   closed, writing nothing, when the bound is exceeded.
+   is kept per row. Operational safety bound (not behavioral semantics): more
+   than ``max_unhandled_events`` stops the run before any write.
 2. **Quarantine** rows that no longer validate (``promotion.invalid_payload``).
 3. For each session key, in sorted key order:
 
    - already promoted  -> every new event is ``promotion.late_event`` (D3);
    - no ``session_closed`` event yet -> pending: counted, not promoted (D2);
-   - too many events   -> ``promotion.session_too_large`` (bound);
+   - more than ``max_session_events`` -> every event is quarantined as
+     ``promotion.session_too_large`` (operational safety bound, not a judgement
+     about the attacker; never a partial promotion);
    - otherwise plan it (D1, D4-D6) and write the session, its events, its
      behaviors and their links in **one transaction**, or quarantine every
      event of a rejected session with the plan's reason.
 
-No clock, no randomness: the outcome depends only on the staged rows, the
-phase-rule artifact and this code. Re-running is a no-op for handled rows.
+No clock, no randomness: the outcome depends only on the staged rows
+(including their ``raw_record_id`` values), the phase-rule artifact and this
+code. Re-running is a no-op for handled rows. See ARCHITECTURE.md §10 for the
+exact determinism guarantee.
 """
 
 from __future__ import annotations

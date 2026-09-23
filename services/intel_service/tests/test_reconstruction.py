@@ -70,7 +70,7 @@ def test_microsecond_resolution_orders_before_raw_record_id() -> None:
 
 
 def test_input_order_never_matters() -> None:
-    """Database read/insertion order and file order reach reconstruction only as input order."""
+    """For fixed raw_record_ids, the order rows are read or inserted cannot change seq."""
     events = [ev(i, at=(i * 7) % 5, text=f"cmd{i}") for i in range(1, 9)]
     expected = seqs(events)
     for permutation in itertools.islice(itertools.permutations(events), 2000):

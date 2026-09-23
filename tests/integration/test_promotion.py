@@ -177,6 +177,12 @@ def test_corpus_sessions_are_synthetic_and_live_ones_honeypot(
 def test_fresh_databases_reconstruct_identically_including_ids(
     pg: Cluster, db: str, tmp_path: Path
 ) -> None:
+    """Mandatory determinism check on the real corpus through the real P3 path.
+
+    Case A: the shipper stages the corpus deterministically (files by name,
+    lines in order), so both fresh databases hold the same raw_record_ids;
+    the reconstruction, identifiers included, is then identical.
+    """
     ingest_corpus(pg, db, tmp_path)
     promoter(pg, db).run()
     first = projection(pg, db)
@@ -197,6 +203,8 @@ def test_fresh_databases_reconstruct_identically_including_ids(
 
 
 def test_file_creation_order_does_not_matter(pg: Cluster, db: str, tmp_path: Path) -> None:
+    """Filesystem creation order never reaches P4: the P3 reader stages files by name,
+    so the raw_record_ids - and hence the reconstruction - are identical (case A)."""
     forward = tmp_path / "forward"
     reverse = tmp_path / "reverse"
     forward.mkdir()
@@ -242,17 +250,110 @@ def test_identical_timestamps_order_by_raw_record_id_not_physical_order(
     ]
 
 
-def test_physical_insertion_order_does_not_change_the_reconstruction(pg: Cluster, db: str) -> None:
-    pairs = list(enumerate(session_lines(), start=1)) + list(enumerate(session_lines(S2), start=11))
-    stage_with_ids(pg, db, pairs)
-    promoter(pg, db).run()
+def _mixed_dataset() -> list[tuple[int, bytes]]:
+    """(raw_record_id, line) pairs exercising every P4 outcome, with timestamp ties."""
+    tie = ts(5)
+    s3, s4, s5 = "a1b2c3d4e5f60003", "a1b2c3d4e5f60004", "a1b2c3d4e5f60005"
+    return [
+        # S1: tied commands (D1), one multi-phase event (D4), promoted.
+        (1, cowrie_line("cowrie.session.connect", session=S1, timestamp=ts(0))),
+        (2, cowrie_line("cowrie.command.input", session=S1, timestamp=tie, input="uname -a")),
+        (3, cowrie_line("cowrie.command.input", session=S1, timestamp=tie, input="curl -T a b")),
+        (4, cowrie_line("cowrie.command.input", session=S1, timestamp=tie, input="tar c x")),
+        (5, cowrie_line("cowrie.session.closed", session=S1, timestamp=ts(9))),
+        # S2: its connect ties with its first command, promoted.
+        (6, cowrie_line("cowrie.session.connect", session=S2, timestamp=tie)),
+        (7, cowrie_line("cowrie.login.failed", session=S2, timestamp=tie)),
+        (8, cowrie_line("cowrie.session.closed", session=S2, timestamp=ts(9))),
+        # S3: no connect event -> quarantined whole (D6).
+        (9, cowrie_line("cowrie.command.input", session=s3, timestamp=tie)),
+        (10, cowrie_line("cowrie.session.closed", session=s3, timestamp=ts(9))),
+        # S4: conflicting src_ip -> quarantined whole (D6).
+        (11, cowrie_line("cowrie.session.connect", session=s4, timestamp=ts(0))),
+        (12, cowrie_line("cowrie.command.input", session=s4, timestamp=tie, src_ip="198.51.100.5")),
+        (13, cowrie_line("cowrie.session.closed", session=s4, timestamp=ts(9))),
+        # S5: open -> pending (D2).
+        (14, cowrie_line("cowrie.session.connect", session=s5, timestamp=ts(0))),
+        # A staged row that fails re-validation -> promotion.invalid_payload.
+        (15, b'{"eventid": "cowrie.command.input", "x": 1}'),
+    ]
+
+
+def test_fixed_staging_dataset_reconstructs_identically_in_any_physical_order(
+    pg: Cluster, db: str
+) -> None:
+    """THE P4 DETERMINISM GUARANTEE (ADR-024), case A.
+
+    The same immutable staging rows - same raw_record_id, same payload, same
+    occurred_at - inserted in different physical orders into two fresh
+    databases produce identical reconstructions: seq values, session, event and
+    behavior IDs, links, normalized fields, provenance anchors and quarantine
+    outcomes. (raw_record_id is part of the fixed dataset; see
+    test_different_raw_record_ids_can_legitimately_reorder_tied_events for
+    what happens when it is not.)
+    """
+    dataset = _mixed_dataset()
+    stage_with_ids(pg, db, dataset)
+    first_run = promoter(pg, db).run()
+    first = projection(pg, db)
+    # The dataset really exercises ties, multi-phase links, quarantine and pending.
+    assert (first_run.sessions_promoted, first_run.pending_sessions) == (2, 1)
+    assert first_run.quarantined == {
+        NO_CONNECT_EVENT: 2,
+        CONFLICTING_FIELD: 3,
+        INVALID_PAYLOAD: 1,
+    }
+    assert len(first["links"]) > len(first["events"])
     other = f"{db}_p"
     pg.create_database(other)
     try:
         pg.upgrade(other)
-        stage_with_ids(pg, other, list(reversed(pairs)))
+        stage_with_ids(pg, other, list(reversed(dataset)))  # different physical order
+        second_run = promoter(pg, other).run()
+        assert second_run == first_run
+        assert projection(pg, other) == first
+    finally:
+        pg.drop_database(other)
+
+
+def test_different_raw_record_ids_can_legitimately_reorder_tied_events(
+    pg: Cluster, db: str
+) -> None:
+    """Case B - documented behavior, NOT a determinism violation.
+
+    D1 orders tied timestamps by raw_record_id, the staging identity assigned
+    when a row is first staged. If the same logical events are staged in a
+    different arrival order, they receive different raw_record_ids, and tied
+    events legitimately take different seq values - and therefore different
+    D5 event IDs (event identity is (session, seq)). Untied events, the
+    session identity and the set of phases are unaffected.
+    """
+    tie = ts(5)
+    connect = cowrie_line("cowrie.session.connect", session=S1, timestamp=ts(0))
+    first_cmd = cowrie_line("cowrie.command.input", session=S1, timestamp=tie, input="uname -a")
+    second_cmd = cowrie_line("cowrie.command.input", session=S1, timestamp=tie, input="tar c x")
+    close = cowrie_line("cowrie.session.closed", session=S1, timestamp=ts(9))
+    stage(pg, db, [connect, first_cmd, second_cmd, close])
+    promoter(pg, db).run()
+    other = f"{db}_b"
+    pg.create_database(other)
+    try:
+        pg.upgrade(other)
+        stage(pg, other, [connect, second_cmd, first_cmd, close])  # tied pair arrives swapped
         promoter(pg, other).run()
-        assert projection(pg, other) == projection(pg, db)
+        sql = "SELECT seq, id::text, normalized_text FROM intel.attack_event ORDER BY seq"
+        a, b = rows(pg, db, sql), rows(pg, other, sql)
+        # Same positions and therefore the same event IDs per seq ...
+        assert [(r[0], r[1]) for r in a] == [(r[0], r[1]) for r in b]
+        # ... but the tied pair's content follows each database's raw_record_id order.
+        assert [r[2] for r in a] == ["", "uname -a", "tar c x", ""]
+        assert [r[2] for r in b] == ["", "tar c x", "uname -a", ""]
+        # Session identity and behavior membership by phase are unchanged.
+        phases = (
+            "SELECT s.id::text, b.phase::text FROM intel.attacker_behavior b "
+            "JOIN intel.attack_session s ON s.id = b.session_id ORDER BY b.phase"
+        )
+        assert rows(pg, db, phases) == rows(pg, other, phases)
     finally:
         pg.drop_database(other)
 
@@ -378,16 +479,41 @@ def test_payload_that_fails_revalidation_is_quarantined(pg: Cluster, db: str) ->
     }
 
 
-def test_oversized_session_is_quarantined(pg: Cluster, db: str) -> None:
-    ids = stage(pg, db, session_lines())
-    result = promoter(pg, db, PromotionLimits(max_session_events=3)).run()
-    assert result.quarantined == {SESSION_TOO_LARGE: len(ids)}
+# Operational safety bounds (ADR-024): they protect the service, they are not a
+# judgement about attacker behavior, and they never promote part of a session.
 
 
-def test_unhandled_bound_fails_closed_before_writing(pg: Cluster, db: str) -> None:
-    stage(pg, db, session_lines() + session_lines(S2))
+@pytest.mark.parametrize(("limit", "promoted"), [(4, True), (3, False)])
+def test_session_event_bound_at_and_over_the_limit(
+    pg: Cluster, db: str, limit: int, promoted: bool
+) -> None:
+    ids = stage(pg, db, session_lines())  # 4 events
+    result = promoter(pg, db, PromotionLimits(max_session_events=limit)).run()
+    events = rows(pg, db, "SELECT count(*) FROM intel.attack_event")
+    if promoted:
+        assert (result.sessions_promoted, events, result.quarantined) == (1, [(4,)], {})
+    else:  # the whole session is quarantined, auditable per event; nothing is promoted
+        assert (result.sessions_promoted, events) == (0, [(0,)])
+        assert result.quarantined == {SESSION_TOO_LARGE: 4}
+        assert rows(
+            pg,
+            db,
+            "SELECT raw_record_id FROM intel_raw.quarantine_record "
+            "WHERE reason_code = 'promotion.session_too_large' ORDER BY raw_record_id",
+        ) == [(i,) for i in ids]
+
+
+def test_backlog_bound_at_the_limit_promotes(pg: Cluster, db: str) -> None:
+    stage(pg, db, session_lines() + session_lines(S2))  # 8 unhandled events
+    result = promoter(pg, db, PromotionLimits(max_unhandled_events=8, page_size=3)).run()
+    assert result.sessions_promoted == 2
+
+
+def test_backlog_bound_over_the_limit_fails_closed_before_any_write(pg: Cluster, db: str) -> None:
+    # Includes a row that would be quarantined: not even quarantine is written.
+    stage(pg, db, [*session_lines(), *session_lines(S2), b'{"eventid": "x"}'])
     with pytest.raises(PromotionBoundError):
-        promoter(pg, db, PromotionLimits(max_unhandled_events=5, page_size=2)).run()
+        promoter(pg, db, PromotionLimits(max_unhandled_events=8, page_size=3)).run()
     assert projection(pg, db) == {
         "sessions": [],
         "events": [],
