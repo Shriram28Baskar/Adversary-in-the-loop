@@ -137,6 +137,9 @@ For the MVP, components are organized as modules within a small number of deploy
 - **`db`** — shared PostgreSQL instance, one logical database, schema-per-domain.
 - **`container-api-proxy`** — third-party restricted proxy in front of the container runtime socket (ADR-019).
 - **Sandboxes** — not Compose services; one container per execution created from the pinned sandbox image by `agent-runtime` (§14).
+- **`db-migrate`** — an *ephemeral deployment job*, not a service: it runs Alembic once per deployment and exits (ADR-022).
+
+**Runtime services ≠ ephemeral deployment jobs.** A runtime service is long-running, holds a runtime database role (§24), and appears in the network membership table of §28. A deployment job runs only when an operator or CI invokes it with `docker compose run --rm`, sits behind a non-default Compose profile so `docker compose up` never starts it, has `restart: "no"`, publishes and exposes no port, accepts no traffic, and exits. Jobs are not counted among the services below and are not subject to the module-vs-service rule; each one requires its own ADR. The only job in the MVP is `db-migrate`.
 
 The core platform remains five backend services plus a frontend plus a database; the honeypot side adds the honeypot and the Log Shipper, and orchestration adds one infrastructure proxy — each justified by an ADR.
 
@@ -441,13 +444,22 @@ Single PostgreSQL instance, schema-per-domain. A dedicated domain type `untruste
 | Role | Used by | Grants |
 |---|---|---|
 | `ingest_writer` | Log Shipper | INSERT on `intel_raw.RawIngestRecord`, `intel_raw.QuarantineRecord` only |
-| `intel_svc` | intel-service | SELECT `intel_raw`; INSERT `intel.*`, `intel_raw.QuarantineRecord`, `ops.events`; UPDATE(`status`) on `intel.Scenario`; SELECT on `agent`, `security`, `eval` (provenance) |
-| `scenario_gen` | intel-service Scenario Generator module (separate connection) | SELECT `intel.AbstractedThreatPattern`, `intel.Scenario`, `agent.AgentTask`, `agent.DataAsset`; INSERT `intel.Scenario`, `intel.ScenarioStep`; no access to `intel_raw`, `AttackEvent`, `AttackerBehavior` |
+| `intel_svc` | intel-service | SELECT `intel_raw`; INSERT `intel.*` **except `intel.Scenario` and `intel.ScenarioStep`**, `intel_raw.QuarantineRecord`, `ops.events`; SELECT `intel.*`; UPDATE(`status`) on `intel.Scenario`; SELECT on `agent`, `security`, `eval` (provenance) |
+| `scenario_gen` | intel-service Scenario Generator module (separate connection) | SELECT `intel.AbstractedThreatPattern`, `intel.Scenario`, `agent.AgentTask`, `agent.DataAsset`; INSERT `intel.Scenario`, `intel.ScenarioStep` (the **only** role that can create scenarios, ADR-021); no access to `intel_raw`, `AttackEvent`, `AttackerBehavior` |
 | `agent_svc` | agent-runtime | SELECT `intel.Scenario`, `agent.*`; INSERT `agent.Execution`, `ops.events`; INSERT `agent.Agent`, `agent.AgentTask`, `agent.Tool`, `agent.DataAsset` (startup loader for version-controlled configuration; a changed file with an existing version is a startup error, as for policies in §17); UPDATE lifecycle/as-run columns of `agent.Execution` |
 | `gateway_svc` | gateway-service | SELECT `agent.*`, `intel.Scenario`, `intel.ScenarioStep`; INSERT `security.*` except `Trajectory`, `ops.events` |
 | `eval_svc` | eval-service | SELECT `intel`, `agent`, `security`, `eval`; INSERT `security.Trajectory`, `eval.*`, `ops.events` |
 
-A trigger on `intel.Scenario` rejects changes to content columns and non-forward status transitions. The migration owner role owns the schemas, is used only by migrations, and is not available to any runtime service; the append-only guarantee therefore holds against the application, not against a database administrator — a documented limit (`PRD.md` FR-044).
+A trigger on `intel.Scenario` rejects changes to content columns and non-forward status transitions. Scenario creation is confined to `scenario_gen` (ADR-021). Status transitions (`UPDATE(status)`) stay with `intel_svc` because the lifecycle API lives there; the trigger makes that the only column it can change.
+
+**Owner and deployment roles** (not runtime roles):
+
+| Role | Attributes | Used by | Privileges |
+|---|---|---|---|
+| `aitl_owner` | `NOLOGIN`, no elevated attributes | nothing logs in as it | Owns the database, every schema, table, function, type and domain |
+| `aitl_migrator` | `LOGIN`, `NOINHERIT`, no elevated attributes | the ephemeral `db-migrate` job only (ADR-022) | `CONNECT` on the database; membership in `aitl_owner` `WITH INHERIT FALSE, SET TRUE`, so it holds no object privileges until it runs `SET ROLE aitl_owner` |
+
+Both are created by the bootstrap script `deploy/postgres/init-roles.sql`. `pg_hba.conf` admits `aitl_migrator` only from the `migrate-net` subnet (§28) and never admits `aitl_owner`. The migrator credential exists only as a deployment secret mounted into `db` (to create the role) and into `db-migrate`; no runtime service receives it, and no runtime role is a member of either role. The owner therefore remains unusable at runtime; the append-only guarantee holds against the application, not against a database administrator — a documented limit (`PRD.md` FR-044).
 
 ## 25. API Architecture
 
@@ -558,6 +570,9 @@ Even though the platform authored it, scenario content *as read by the agent* re
 | `orchestration-net` | `internal` | agent-runtime, container-api-proxy | Sandbox lifecycle only |
 | `llm-egress` | bridge (outbound) | gateway-service only | Model Proxy to the configured provider |
 | `operator-net` | bridge, published on `127.0.0.1` | dashboard | Operator browser access |
+| `migrate-net` | `internal`, fixed subnet `10.231.254.0/29` | db, the `db-migrate` deployment job (only while it runs) | Migration path; the only source address `pg_hba.conf` accepts for `aitl_migrator` |
+
+**Deployment jobs (not runtime services).** The table above lists runtime services, plus `db-migrate` on `migrate-net`, which is listed only while the job runs (§6, ADR-022). `db-migrate` is attached to `migrate-net` only. It is never on `sandbox-net`, `core-net`, `ingest-net`, `orchestration-net`, or any outbound network, so no sandbox, runtime service, or honeypot component can reach it, and it can reach nothing but the database. No runtime service joins `migrate-net`. That is what makes the subnet-bound `pg_hba.conf` rule meaningful: stealing the migrator password is not enough without also getting onto `migrate-net`. The Compose topology tests (§33) enforce this membership.
 
 Default-deny between segments except these explicit paths. No volumes are shared across segments except the one-way `honeypot-logs` volume (§9). No credentials are shared across segments; per-service database roles (§24) and per-service API tokens are generated per deployment and are fixture-grade local secrets, never production credentials. Container-level resource limits apply everywhere (`CLAUDE.md` Honeypot Isolation Rules, Sandbox Rules).
 
@@ -595,7 +610,15 @@ Structured JSON logs from every service, carrying `execution_id` and `pair_id` w
 
 **`honeypot-host` profile (live capture).** A separate Compose file deployed on a separate VM/host: `honeypot` (Cowrie, published SSH port, host firewall egress rules) and `log-shipper` (live mode), connected to the core database as described in §9 (ADR-010). The isolation tests (§33) run on every deployment of this profile.
 
-All images — Cowrie, sandbox, services, container API proxy — are pinned by digest.
+All images — Cowrie, sandbox, services, container API proxy, migration job base image — are pinned by digest.
+
+**Schema migration (both profiles that host the database).** Migrations never run inside a runtime service. On each deployment, after `db` is healthy and before the services start (or restart onto a new schema), the operator or CI runs the ephemeral job once:
+
+```
+docker compose --env-file deploy/versions.env run --rm db-migrate
+```
+
+The job exits 0 when the database is at head and back in its runtime security state. It exits non-zero on any failure, and the deployment step then fails. Runtime services are started only after it exits 0 (ADR-022).
 
 ## 32. Development Environment
 
@@ -615,6 +638,7 @@ Every MUST requirement maps to at least one automated test. The inventory:
 - **Isolation tests (every deployment):** from inside the honeypot container, outbound connections to internet, db, Gateway, and Log Shipper fail (FR-004, FR-004a); Cowrie forwarding/download disabled (FR-004a); Log Shipper has no listening socket and a read-only mount (FR-004b (b), (d)); deployment-config scan for shared secrets, volumes, networks, roles, and fixture credentials in Cowrie config (FR-004c); single-host profile publishes no honeypot port (FR-004d).
 - **Fixture-corpus tests:** version-controlled honeypot session fixtures, ingested through the Log Shipper in fixture mode, with expected timelines, TTPs, mappings, and patterns (FR-005b, FR-007); fixture sessions labeled `synthetic`.
 - **Replay tests (CI, scripted test agent):** the flagship fixture scenario run as a pair asserts baseline `attack_success = true`, protected `attack_success = false`, protected score < baseline score, and task success in both (`CLAUDE.md` Testing Rules); injected drift invalidates the pair (FR-033a (c)); arm-order alternation recorded (FR-033b); N > 1 reports k/N (FR-033c); no delete path (FR-033d); copy test — no UI/report string uses "exact replay" or "identical attack" (FR-031).
+- **Deployment tests:** the migration job, run against real PostgreSQL, migrates from empty as `aitl_migrator` and produces a catalog identical to the reference path; re-running it is a no-op; every failure mode exits non-zero. Runtime credentials cannot authenticate as the migrator, runtime roles cannot `SET ROLE` to the owner or migrator, and the migrator holds no object privileges without `SET ROLE`. A real server loaded with the repository's `pg_hba.conf` rejects the migrator from outside `migrate-net` and never admits the owner or the superuser over TCP. The rendered Compose file shows `db-migrate` only behind its profile, only on `migrate-net`, with no port, no restart, and no runtime service holding the migrator secret (ADR-022). Scenario writer isolation: INSERT on `Scenario`/`ScenarioStep` is denied for every role except `scenario_gen` (ADR-021).
 - **Live-LLM evaluation runs** are evaluations, not CI tests, and are never used to make a test pass.
 
 ## 34. Scalability Considerations
@@ -666,6 +690,41 @@ Per `PROJECT_VISION.md §15`: extend the Replay Engine into a security-learning 
 **ADR-019 — Sandbox orchestration through a restricted container API proxy.** *Decision:* `agent-runtime` reaches the container runtime only through a pinned third-party socket proxy on `orchestration-net` that permits only container create/start/inspect/wait/kill/remove, and builds every create request from a fixed code-defined template (§14). *Dependency justification:* creating disposable per-execution containers requires container-runtime access; mounting the raw socket into a service is equivalent to host root. *Residual risk:* endpoint-level filtering does not restrict create-request contents, so the fixed template in `agent-runtime` is the control, and `agent-runtime` never processes LLM output or attacker text. *Alternatives considered:* raw socket mount (rejected); a Kubernetes-style orchestrator (rejected per `CLAUDE.md` Dependency Rules).
 
 **ADR-020 — Structured tool arguments and canonicalization.** *Decision:* no raw SQL, URLs, or free-form paths reach tools; arguments are enums and bounded values canonicalized before policy evaluation, and the canonical form is what is evaluated, logged, and dispatched. *Rationale:* raw SQL makes resource/tier resolution nondeterministic, free paths allow traversal, URLs invite SSRF, and content snippets in search results leak tagged data under an ALLOW.
+
+**ADR-021 — Scenario creation isolated to `scenario_gen`.** *Decision:* only `scenario_gen` holds INSERT on `intel.Scenario` and `intel.ScenarioStep`. `intel_svc` keeps INSERT on the rest of `intel.*`, keeps SELECT, and keeps `UPDATE(status)` for forward-only lifecycle transitions (migration 0013). *Rationale:* FR-010c/FR-011 require that attacker text never reaches scenario generation. `intel_svc` must read the attacker-text tables (`intel_raw`, `AttackEvent`, `AttackerBehavior`) to promote, reconstruct and classify. With scenario INSERT as well, that one role could write attacker text into scenario content, and the only control would be service code. Taking scenario INSERT away from `intel_svc` makes the abstraction boundary a database property. The role that can create a `Scenario` cannot read attacker text, and the role that can read attacker text cannot create a `Scenario`. `scenario_gen` gains nothing: its grants were already INSERT on both tables and SELECT on patterns, scenarios, tasks and assets. *Provenance:* unchanged. `Scenario.threat_pattern_id` stays NOT NULL, the composite FKs still bind scenario → pattern → TTP chain → session, and `source_type` still equals the origin (FR-045a/FR-045d). *Alternatives considered:* keep INSERT on `intel_svc` and rely on code review (rejected — no enforcement); a SECURITY DEFINER insert function (rejected — adds an elevated code path for no gain over a grant).
+
+**ADR-022 — Schema migrations as an ephemeral deployment job with a dedicated migrator role.** *Decision:* migrations run only in the `db-migrate` job, as the dedicated role `aitl_migrator`. *Not a new service:* the job runs once per deployment and exits. It is not a runtime service and not a persistent component (§6).
+- *Image/build source:* `deploy/migrate/Dockerfile`, built from a digest-pinned `python:3.11-slim` base. It installs only Alembic, SQLAlchemy and psycopg with `pip --require-hashes`, from `deploy/migrate/requirements.txt`, which is exported from the `migrate` dependency group of `uv.lock` (a test asserts they match). It copies in only `migrations/`: no application package, no server. It runs as uid 65534 with entrypoint `migrations/job.py`.
+- *Network attachment:* `migrate-net` only (`internal`, fixed subnet `10.231.254.0/29`), shared only with `db`. It is not on `sandbox-net` or any other network, so the agent cannot reach it. It has no published or exposed port and opens no listener, so it accepts no inbound traffic. PostgreSQL remains unpublished.
+- *Credential flow:* `deploy/secrets/generate.sh` creates `aitl_migrator_password` alongside the runtime-role secrets. Compose mounts it into `db`, whose first-initialization hook uses it to create the role via `init-roles.sql`, and into `db-migrate` at `/run/secrets/aitl_migrator_password`. The job reads the password only from `AITL_MIGRATION_PASSWORD_FILE` and refuses inline `AITL_MIGRATION_PASSWORD`/`AITL_MIGRATION_DSN` values. `aitl_owner` has no credential at all. The job logs JSON lines that never contain the password.
+- *Privilege model:* `aitl_migrator` is `LOGIN NOINHERIT`, with no superuser, createrole, createdb, replication or bypassrls. It is a member of `aitl_owner` `WITH INHERIT FALSE, SET TRUE`, and holds `CONNECT` on the database, because migration 0012 revokes it from PUBLIC. It must `SET ROLE aitl_owner` (done in `migrations/env.py`) to touch any object, so every object stays owned by the NOLOGIN owner. `pg_hba.conf` admits it only from `10.231.254.0/29` with SCRAM; the owner and the superuser are never admitted over the network. `pg_hba.conf` is otherwise unchanged.
+- *Invocation:* `docker compose --env-file deploy/versions.env run --rm db-migrate` (§31). The `deploy-jobs` profile keeps `docker compose up` from ever starting it.
+- *DB readiness wait:* Compose `depends_on: db: condition: service_healthy`. The job also retries its first connection with bounded exponential backoff for up to `AITL_MIGRATION_WAIT_SECONDS` (default 60). Authentication and `pg_hba.conf` refusals are permanent, so they fail immediately instead of being retried.
+- *Success/failure behavior:*
+  - Alembic runs `upgrade head`. Each migration runs in its own transaction (`transaction_per_migration`), so a failure rolls back that migration and leaves the database at the last completed revision, never half-applied; a re-run resumes from there.
+  - The job then verifies the runtime security state:
+    - the version equals head;
+    - the session is the non-superuser migrator;
+    - the owner is NOLOGIN;
+    - PUBLIC has no CONNECT;
+    - no runtime role is a member of the owner or the migrator;
+    - every application object is owned by `aitl_owner`.
+  - Exit codes: 0 migrated or already at head; 1 migration failed; 2 database not ready within the wait budget; 3 security postcondition failed; 4 configuration or authentication error. Any non-zero code fails the deployment step.
+- *Idempotency:* re-running at head is a no-op. Alembic applies nothing, the postcondition re-checks, and the catalog is unchanged; a test asserts this.
+- *Kept from remaining active:* no long-running process (the entrypoint returns); `restart: "no"`; `run --rm` removes the container; a non-default profile; read-only root filesystem; all capabilities dropped; `no-new-privileges`. The topology tests reject any drift in these settings.
+- *Runtime services cannot use migration credentials:*
+  - No runtime service receives the migrator secret or any `*MIGRAT*` variable; a Compose policy test enforces this.
+  - No runtime service is on `migrate-net`, so even a stolen migrator password is refused by `pg_hba.conf` from `core-net`.
+  - Runtime roles cannot `SET ROLE` to the owner or the migrator.
+  - `create_role_engine` refuses the migrator and owner identities and any runtime session that is a member of either role.
+
+*Alternatives considered:*
+- Migrate from a runtime service at startup (rejected — would put owner-capable credentials in a long-running, network-reachable process).
+- Use the bootstrap superuser (rejected — superuser over the network would require weakening `pg_hba.conf`).
+- A LOGIN `aitl_owner` (rejected — the owner must stay NOLOGIN).
+- A persistent migration service (rejected — adds an always-on holder of the most privileged application credential).
+
+*Residual risk:* the migrator password sits on the deployment host in the 0700 `deploy/secrets/generated/` directory, like every other role secret. Non-swarm Compose bind-mounts file secrets with their host permissions, and the files are read by non-root container users, so the files themselves are 0644 while the 0700 directory remains the host access boundary.
 
 ## 37. Initial Configuration-as-Data Artifacts (v1)
 
@@ -740,3 +799,7 @@ This check was re-run after the revision-3 edits across all four documents.
 - **Isolation:** zero-egress honeypot, one-way volume, portless Log Shipper, separate host for exposure, sandbox-net with Gateway as sole peer, Model Proxy — identical in `PRD.md §11/§12/§15/§21`, this document §9/§14/§16/§28/§31, and `CLAUDE.md` Core Architecture Principle #3 and Security Principles #4–#6.
 - **Immutability:** one list in `PRD.md` FR-044, enforced by grants in this document §24, referenced by `CLAUDE.md` Security Principle #24.
 - **Scope:** `PRD.md §34` lists every MUST/SHOULD requirement exactly once and matches the priorities stated in each requirement body.
+- **P1 review resolutions (ADR-021, ADR-022):**
+  - Scenario creation belongs to `scenario_gen` alone, in §24, migration 0013 and the grant tests. `scenario_gen` did not gain any grant. FR-010c/FR-011 and `CLAUDE.md` Forbidden Shortcuts need no text change: they already forbid attacker-text access for the Scenario Generator, and this makes that rule hold at the database layer too.
+  - Migrations run only in the ephemeral `db-migrate` job (§6, §28, §31) as `aitl_migrator`. `aitl_owner` stays NOLOGIN.
+  - `PRD.md` FR-044 ("the database migration owner role is not used at runtime") still holds as written; no PRD change is needed.

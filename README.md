@@ -38,9 +38,15 @@ services connect only as their own least-privilege role
 
 - Roles: `deploy/postgres/init-roles.sql` (run once per cluster by the
   bootstrap superuser; `deploy/postgres/10-init-roles.sh` does this in Compose).
-- Migrations: run by the migration job with the bootstrap admin DSN, which
-  switches to `aitl_owner` before creating objects:
-  `AITL_MIGRATION_DSN=postgresql+psycopg://... uv run --locked alembic -c migrations/alembic.ini upgrade head`
+- Migrations: run only by the ephemeral `db-migrate` deployment job (ADR-022),
+  which connects as `aitl_migrator` (password from a Compose file secret; admitted
+  by `pg_hba.conf` only from `migrate-net`), switches to `aitl_owner` before
+  creating objects, verifies the runtime security state, and exits. It is never
+  started by `docker compose up`; run it once per deployment after `db` is up:
+  `docker compose --env-file deploy/versions.env run --rm db-migrate`
+  (exit 0 = at head; non-zero = the deployment must stop).
+- Scenario rows can be created only by the `scenario_gen` role, which cannot read
+  any attacker-text table (ADR-021).
 - Tests use real PostgreSQL only: a disposable local cluster started from the
   server binaries, or the cluster named by `AITL_TEST_PG_ADMIN_DSN` (CI uses a
   digest-pinned PostgreSQL service container).
