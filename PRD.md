@@ -366,3 +366,4 @@ Items previously marked `[OPEN DECISION]` are resolved as below; revision-3 deci
 - **ED-14** Synthetic data enters only via the Log Shipper fixture mode; `AbstractedThreatPattern` FK NOT NULL for all scenarios (FR-005b, FR-010c, FR-045d).
 - **ED-15** Sandbox orchestration through a restricted container-API proxy (FR-017; ADR-019).
 - **ED-16** Minimal purpose-built agent loop; one LLM provider and one pinned model identifier configured as `Agent` data (FR-001, NG4).
+- **ED-17** Deterministic promotion and behavior reconstruction (P4): events ordered by `(occurred_at, raw_record_id)`; promotion on `session_closed` only; late events quarantined; one `AttackerBehavior` per distinct phase; UUIDv5 identifiers in fixed namespaces; connect-owned session network fields with whole-session quarantine on conflict; fixed event-type → `raw_text` mapping (FR-005, FR-006, FR-013, FR-048; ADR-024).
