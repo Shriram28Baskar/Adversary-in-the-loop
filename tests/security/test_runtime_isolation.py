@@ -500,3 +500,99 @@ def test_probe_detects_honeypot_attached_to_ingest_net(stack: Stack) -> None:
         _docker("network", "disconnect", network, container)
     assert weakened["connect"]["db_ingest_net"] == "connected"
     assert stack.probe("honeypot")["connect"]["db_ingest_net"] == "ENETUNREACH"
+
+
+# --- FR-004a: the application restriction holds without the network boundary ----------
+
+FETCH_PROBE = textwrap.dedent(
+    """
+    import errno, json, socket, sys
+    out_addr, targets = sys.argv[1], json.loads(sys.argv[2])
+    def tcp(bind, host, port):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(3)
+        try:
+            if bind:
+                s.bind((bind, 0))
+            s.connect((host, port))
+            return "connected"
+        except socket.timeout:
+            return "timeout"
+        except OSError as exc:
+            return errno.errorcode.get(exc.errno, str(exc.errno))
+        finally:
+            s.close()
+    def udp(bind, host, port):
+        u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            u.bind((bind, 0))
+            u.sendto(b"probe", (host, port))
+            return "sent"
+        except OSError as exc:
+            return errno.errorcode.get(exc.errno, str(exc.errno))
+        finally:
+            u.close()
+    print(json.dumps({
+        name: {
+            "unbound": tcp(None, host, port),
+            "out_addr_tcp": tcp(out_addr, host, port),
+            "out_addr_udp": udp(out_addr, host, port),
+        }
+        for name, (host, port) in targets.items()
+    }))
+    """
+)
+
+
+def _committed_out_addr() -> str:
+    from tests.security import cowrie_policy
+
+    config = cowrie_policy.read_effective(
+        cowrie_policy.DIST.read_text(encoding="utf-8"),
+        cowrie_policy.OVERLAY.read_text(encoding="utf-8"),
+    )
+    return str(config.get("honeypot", "out_addr"))
+
+
+def test_loopback_bound_fetch_fails_on_an_open_network(stack: Stack) -> None:
+    """(4) With network isolation removed, Cowrie's fetch sockets still go nowhere.
+
+    Runs Cowrie's user, with its hardening flags, on an ordinary *routable*
+    bridge that has a live target. The control (an unbound socket, i.e. what
+    ``out_addr = 0.0.0.0`` would do) connects; a socket bound to the committed
+    ``out_addr`` - as every Cowrie 3.0.15 fetch path binds - is refused by the
+    kernel (EINVAL) for TCP and UDP, to the local target and to a public one.
+    """
+    targets = {
+        "open_net_target": stack.targets["bridge_net"],
+        "public_ip": stack.targets["internet_ip"],
+    }
+    result = subprocess.run(
+        [
+            "docker", "run", "--rm",
+            "--network", f"{stack.project}_bridgeprobe",
+            "--user", "999:999", "--read-only", "--cap-drop", "ALL",
+            "--security-opt", "no-new-privileges:true",
+            runtime_standin.TAG, "-c", FETCH_PROBE, _committed_out_addr(), json.dumps(targets),
+        ],
+        capture_output=True, text=True, check=True,
+    )  # fmt: skip
+    probed = json.loads(result.stdout)
+    assert probed["open_net_target"]["unbound"] == "connected"  # the network is open
+    for name in targets:
+        assert probed[name]["out_addr_tcp"] == "EINVAL", probed
+        assert probed[name]["out_addr_udp"] == "EINVAL", probed
+
+
+def test_loopback_bound_fetch_also_fails_inside_the_honeypot(stack: Stack) -> None:
+    """Both controls hold at once in the real honeypot service definition."""
+    targets = {"db": stack.targets["db_ingest_net"], "public_ip": stack.targets["internet_ip"]}
+    result = stack.compose(
+        "exec", "-T", "honeypot", runtime_standin.PYTHON, "-c", FETCH_PROBE,
+        _committed_out_addr(), json.dumps(targets),
+    )  # fmt: skip
+    probed = json.loads(result.stdout)
+    for name in targets:
+        assert probed[name]["unbound"] in NO_ROUTE, probed
+        assert probed[name]["out_addr_tcp"] in {"EINVAL", "ENETUNREACH"}, probed
+        assert probed[name]["out_addr_udp"] in {"EINVAL", "ENETUNREACH"}, probed

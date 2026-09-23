@@ -116,7 +116,7 @@ Implement, in order of priority, a system that: (1) captures attacker behavior f
 
 # Honeypot Isolation Rules
 
-- Zero egress from the honeypot container, enforced at the network layer (host firewall on the honeypot host; `internal` network in the single-host profile); Cowrie forwarding and download features disabled. Any exception must be explicitly justified in an ADR and reviewed.
+- Zero egress from the honeypot container, enforced at the network layer (host firewall on the honeypot host; `internal` network in the single-host profile); Cowrie forwarding disabled, and download/fetch behavior restricted at the application layer and rendered non-functional by the zero-egress boundary (`PRD.md` FR-004a, ADR-023). Any exception must be explicitly justified in an ADR and reviewed.
 - No shared secrets, credentials, or network namespace between the honeypot and any other component; the Log Shipper's `ingest_writer` role is INSERT-only on `intel_raw` and used by nothing else.
 - Never publish a honeypot port from the single-host profile; internet exposure happens only in the `honeypot-host` profile on a separate host (`PRD.md` FR-004d).
 - Honeypot and fixture data enter the rest of the system only through the Log Shipper (live or fixture mode) and `intel-service` promotion (`PRD.md` FR-005, FR-005b, FR-013), never through an ad hoc shortcut or a separate loader.

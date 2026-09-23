@@ -17,3 +17,13 @@ effective configuration (defaults + `honeypot/cowrie/etc/cowrie.cfg`). It is
 test data, never deployed. Its placeholder credentials (for disabled output
 plugins) are upstream examples, not secrets. License: `LICENSE.rst`
 (BSD-3-Clause).
+
+## Vendored upstream sources (FR-004a evidence; ADR-023)
+
+`src/cowrie/**/*.py.txt` are unmodified copies of the release's
+`src/cowrie/core/network.py`, `core/download.py` and
+`commands/{wget,curl,tftp,ftpget,nc}.py` from the same tarball, renamed to
+`.txt` so no tool imports, lints or executes them. They are read as text by
+`tests/security/test_cowrie_fetch_restriction.py`, which pins each file's
+sha256 and checks that every fetch path binds to `out_addr`, gates on the
+non-global-target blocklist and honours `download_limit_size`.
