@@ -1,6 +1,6 @@
 """Migration behavior (engineering plan P1; ARCHITECTURE.md §24).
 
-Empty database -> head, strict ordering of 0001..0012, presence of every
+Empty database -> head, strict ordering of 0001..0013, presence of every
 schema, table, constraint, index, trigger and role, owner NOLOGIN, and a
 downgrade/re-upgrade round trip on disposable databases.
 """
@@ -14,7 +14,7 @@ from alembic.script import ScriptDirectory
 
 from tests.pg_harness import ALEMBIC_INI, OWNER_ROLE, RUNTIME_ROLES, Cluster
 
-EXPECTED_REVISIONS = [f"{n:04d}" for n in range(1, 13)]
+EXPECTED_REVISIONS = [f"{n:04d}" for n in range(1, 14)]
 EXPECTED_FILES = [
     "0001_schemas_domain_enums.py",
     "0002_config_tables.py",
@@ -28,6 +28,7 @@ EXPECTED_FILES = [
     "0010_eval.py",
     "0011_ops_events.py",
     "0012_grants_and_immutability.py",
+    "0013_scenario_writer_isolation.py",
 ]
 SCHEMAS = {"intel_raw", "intel", "agent", "security", "eval", "ops"}
 TABLES = {
@@ -166,7 +167,7 @@ def _rows(pg: Cluster, db: str, sql: str) -> set[str]:
 
 def test_revision_chain_is_linear_and_ordered() -> None:
     script = _script()
-    assert script.get_heads() == ["0012"]
+    assert script.get_heads() == ["0013"]
     chain = [rev.revision for rev in script.walk_revisions("base", "heads")]
     assert list(reversed(chain)) == EXPECTED_REVISIONS
     for revision in script.walk_revisions("base", "heads"):
@@ -263,7 +264,7 @@ def test_downgrade_each_step_then_reupgrade(pg: Cluster, fresh_db: str) -> None:
         == set()
     )
     pg.upgrade(fresh_db, "head")
-    assert _rows(pg, fresh_db, "SELECT version_num FROM public.alembic_version") == {"0012"}
+    assert _rows(pg, fresh_db, "SELECT version_num FROM public.alembic_version") == {"0013"}
     with pg.admin(fresh_db) as conn:
         (held,) = conn.execute(  # type: ignore[misc]
             "SELECT has_table_privilege('ingest_writer', 'intel_raw.raw_ingest_record', 'INSERT')"

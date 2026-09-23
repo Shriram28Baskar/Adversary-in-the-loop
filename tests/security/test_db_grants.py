@@ -59,6 +59,7 @@ EVAL = (
     "eval.evaluation_result",
 )
 OPS = ("ops.events",)
+SCENARIO_TABLES = ("intel.scenario", "intel.scenario_step")
 ALL_TABLES = (*INTEL_RAW, *INTEL, *AGENT, *SECURITY, *EVAL, *OPS)
 
 SEL, INS = "SELECT", "INSERT"
@@ -79,10 +80,12 @@ def _merge(*parts: dict[str, set[str]]) -> dict[str, frozenset[str]]:
 # Table-level privileges each runtime role must hold (anything absent must be denied).
 EXPECTED: dict[str, dict[str, frozenset[str]]] = {
     "ingest_writer": _merge(_grant(INTEL_RAW, INS)),
+    # ADR-021: intel_svc reads attacker text, so it may not create scenarios.
     "intel_svc": _merge(
         _grant(INTEL_RAW, SEL),
         _grant(("intel_raw.quarantine_record",), INS),
-        _grant(INTEL, SEL, INS),
+        _grant(INTEL, SEL),
+        _grant(tuple(t for t in INTEL if t not in SCENARIO_TABLES), INS),
         _grant(AGENT + SECURITY + EVAL, SEL),
         _grant(OPS, INS),
     ),

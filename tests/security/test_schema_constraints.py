@@ -277,6 +277,69 @@ def test_unmapped_ttp_has_no_tactic(pg: Cluster, db: str, chain: FullChain) -> N
     assert state == CHECK
 
 
+# --- Scenario writer isolation (ADR-021; FR-010c) -------------------------------------------
+
+
+def test_scenario_gen_can_insert_scenario_and_step(pg: Cluster, db: str, chain: FullChain) -> None:
+    values = scenario_values(chain.intel.pattern_id, "synthetic")
+    assert sqlstate_of(pg, db, "scenario_gen", *insert_scenario_sql(values)) is None
+    step = (
+        "INSERT INTO intel.scenario_step (scenario_id, version, ordinal, step_type, description) "
+        "VALUES (%s, 1, 1, 'legitimate_task', 'read the task document')"
+    )
+    assert sqlstate_of(pg, db, "scenario_gen", step, (values["scenario_id"],)) is None
+
+
+def test_intel_svc_cannot_insert_scenario(pg: Cluster, db: str, chain: FullChain) -> None:
+    """A role that can read attacker text has no path to create a scenario."""
+    values = scenario_values(chain.intel.pattern_id, "synthetic")
+    assert sqlstate_of(pg, db, "intel_svc", *insert_scenario_sql(values)) == DENIED
+
+
+def test_intel_svc_cannot_insert_scenario_step(pg: Cluster, db: str, chain: FullChain) -> None:
+    state = sqlstate_of(
+        pg,
+        db,
+        "intel_svc",
+        "INSERT INTO intel.scenario_step (scenario_id, version, ordinal, step_type, description) "
+        "VALUES (%s, 1, 99, 'injected', 'not allowed')",
+        (chain.scenario_id,),
+    )
+    assert state == DENIED
+
+
+@pytest.mark.parametrize(
+    "role",
+    ["ingest_writer", "intel_svc", "agent_svc", "gateway_svc", "eval_svc"],
+)
+def test_only_scenario_gen_writes_scenarios(
+    pg: Cluster, db: str, chain: FullChain, role: str
+) -> None:
+    values = scenario_values(chain.intel.pattern_id, "synthetic")
+    assert sqlstate_of(pg, db, role, *insert_scenario_sql(values)) == DENIED
+
+
+@pytest.mark.parametrize(
+    "table",
+    [
+        "intel_raw.raw_ingest_record",
+        "intel_raw.quarantine_record",
+        "intel.attack_session",
+        "intel.attack_event",
+        "intel.attacker_behavior",
+        "intel.behavior_event",
+        "intel.ttp",
+        "intel.ttp_technique",
+        "intel.threat_pattern_source",
+    ],
+)
+def test_scenario_gen_cannot_read_attacker_derived_tables(
+    pg: Cluster, db: str, chain: FullChain, table: str
+) -> None:
+    """Populated tables: the denial is a privilege failure, not an empty result."""
+    assert sqlstate_of(pg, db, "scenario_gen", f"SELECT * FROM {table}") == DENIED
+
+
 # --- Scenario immutability and review gate (FR-012, FR-015) ------------------------------
 
 
