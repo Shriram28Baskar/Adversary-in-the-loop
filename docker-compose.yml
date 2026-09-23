@@ -48,6 +48,45 @@ services:
       timeout: 3s
       retries: 20
 
+  # --- Honeypot (isolation-test profile only; PRD FR-004, FR-004a, FR-004d) -------
+  # Never started by `up`; no published port. It exists single-host only so the
+  # isolation tests can prove zero egress. The internet-exposed honeypot runs
+  # only on a separate host (ADR-010).
+  #   docker compose --env-file deploy/versions.env --profile honeypot-isolation up honeypot
+  honeypot:
+    profiles: ["honeypot-isolation"]
+    image: ${COWRIE_IMAGE:?COWRIE_IMAGE must be set via deploy/versions.env}
+    user: "999:999"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 256
+    ulimits:
+      nofile: 4096
+    networks:
+      - honeypot-net
+    volumes:
+      # Configuration: read-only (covers the image's etc VOLUME).
+      - type: bind
+        source: ./honeypot/cowrie/etc
+        target: /cowrie/cowrie-git/etc
+        read_only: true
+      # The one-way telemetry volume: Cowrie's JSON log only (ARCHITECTURE.md §9).
+      - type: volume
+        source: honeypot-logs
+        target: /cowrie/cowrie-git/var/log/cowrie
+    tmpfs:
+      # Covers the image's var VOLUME; size-bounded, never shared.
+      - /cowrie/cowrie-git/var:size=16m,mode=0755,uid=999,gid=999
+      # Host keys and recorded upload/download artifacts: Cowrie-only, bounded.
+      - /cowrie/cowrie-git/var/lib/cowrie:size=64m,mode=0700,uid=999,gid=999
+      - /tmp:size=16m,mode=1777
+
   # --- Ephemeral deployment jobs (not runtime services; ADR-022) ----------------
   # Runs only when invoked, exits, and is removed:
   #   docker compose --env-file deploy/versions.env run --rm db-migrate
@@ -111,6 +150,14 @@ networks:
 
 volumes:
   db-data: {}
+  # One-way honeypot telemetry: written by Cowrie only, read (read-only) only by
+  # the Log Shipper in live mode. Size-bounded so a flood cannot fill the host.
+  honeypot-logs:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=256m,uid=999,gid=999,mode=0755"
 
 secrets:
   postgres_superuser_password:

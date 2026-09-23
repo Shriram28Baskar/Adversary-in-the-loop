@@ -66,6 +66,20 @@ MIGRATE_NET_MEMBERS = frozenset({"db", "db-migrate"})
 MIGRATOR_SECRET = "aitl_migrator_password"  # noqa: S105 - a secret name, not a value
 MIGRATOR_SECRET_HOLDERS = frozenset({"db", "db-migrate"})
 
+# P3 hardening (FR-004a, FR-004b, FR-017-style limits): per-service ceilings for
+# (memory bytes, cpus, pids). A hardened service must declare all three.
+RESOURCE_CEILINGS: Mapping[str, tuple[int, float, int]] = {
+    "honeypot": (512 * 1024 * 1024, 1.0, 256),
+    "log-shipper": (256 * 1024 * 1024, 0.5, 64),
+}
+# Cowrie 3.0.15 image layout (docker/Dockerfile of the release): the image
+# declares these VOLUMEs, which must be covered explicitly or they become
+# writable, unbounded anonymous volumes under a read-only root.
+COWRIE_ETC = "/cowrie/cowrie-git/etc"
+COWRIE_VAR = "/cowrie/cowrie-git/var"
+COWRIE_LOG_DIR = "/cowrie/cowrie-git/var/log/cowrie"
+COWRIE_CONFIG_SOURCE_SUFFIX = "/honeypot/cowrie/etc"
+
 _DIGEST_PINNED = re.compile(r"@sha256:[0-9a-f]{64}$")
 _SECRET_ENV_NAME = re.compile(r"(PASSWORD|PASSWD|SECRET|TOKEN|API_?KEY|PRIVATE_?KEY|CREDENTIAL)")
 
@@ -192,6 +206,11 @@ def check_services(
         if image is not None and not _DIGEST_PINNED.search(str(image)):
             violations.append(f"service {name}: image {image!r} is not pinned by sha256 digest")
 
+        if name in RESOURCE_CEILINGS:
+            violations.extend(_check_hardened(name, service))
+        if name == "honeypot":
+            violations.extend(_check_honeypot(service))
+
         environment = service.get("environment") or {}
         for key, value in environment.items():
             secret_like = _SECRET_ENV_NAME.search(key.upper()) and not key.upper().endswith("_FILE")
@@ -199,6 +218,12 @@ def check_services(
                 violations.append(
                     f"service {name}: secret-like variable {key} set inline (use a *_FILE secret)"
                 )
+
+    log_volume = (rendered_all_profiles.get("volumes") or {}).get(HONEYPOT_LOG_VOLUME)
+    if log_volume is not None:
+        options = str(((log_volume or {}).get("driver_opts") or {}).get("o", ""))
+        if "size=" not in options:
+            violations.append(f"volume {HONEYPOT_LOG_VOLUME}: must be size-bounded")
 
     migrate_members = {
         name for name, svc in services.items() if MIGRATE_NET in (svc.get("networks") or {})
@@ -239,4 +264,79 @@ def _check_deployment_job(
     user = str(service.get("user") or "")
     if user.split(":")[0] in ("", "0", "root"):
         violations.append(f"job {name}: must run as a non-root user")
+    return violations
+
+
+def _check_hardened(name: str, service: Mapping[str, Any]) -> list[str]:
+    """Container hardening for the honeypot side (ARCHITECTURE.md §9)."""
+    violations: list[str] = []
+    if service.get("read_only") is not True:
+        violations.append(f"service {name}: root filesystem must be read-only")
+    if "ALL" not in (service.get("cap_drop") or []):
+        violations.append(f"service {name}: must drop all capabilities")
+    if service.get("cap_add"):
+        violations.append(f"service {name}: must not add capabilities")
+    if service.get("devices"):
+        violations.append(f"service {name}: must not map host devices")
+    if "no-new-privileges:true" not in (service.get("security_opt") or []):
+        violations.append(f"service {name}: must set no-new-privileges")
+    user = str(service.get("user") or "")
+    if user.split(":")[0] in ("", "0", "root"):
+        violations.append(f"service {name}: must run as a non-root user")
+    max_mem, max_cpus, max_pids = RESOURCE_CEILINGS[name]
+    try:
+        mem = int(str(service.get("mem_limit")))
+        cpus = float(str(service.get("cpus")))
+        pids = int(str(service.get("pids_limit")))
+    except ValueError:
+        return [*violations, f"service {name}: mem_limit, cpus and pids_limit are required"]
+    if not 0 < mem <= max_mem:
+        violations.append(f"service {name}: mem_limit {mem} exceeds {max_mem}")
+    if not 0 < cpus <= max_cpus:
+        violations.append(f"service {name}: cpus {cpus} exceeds {max_cpus}")
+    if not 0 < pids <= max_pids:
+        violations.append(f"service {name}: pids_limit {pids} exceeds {max_pids}")
+    for entry in service.get("tmpfs") or []:
+        if "size=" not in str(entry):
+            violations.append(f"service {name}: tmpfs {entry!r} must be size-bounded")
+    return violations
+
+
+def _check_honeypot(service: Mapping[str, Any]) -> list[str]:
+    """The honeypot holds nothing and can reach nothing but its own log volume."""
+    violations: list[str] = []
+    if service.get("environment"):
+        # Cowrie treats COWRIE_<SECTION>_<OPTION> variables as config overrides.
+        violations.append("service honeypot: must set no environment (COWRIE_* overrides config)")
+    if service.get("secrets"):
+        violations.append("service honeypot: must hold no secret")
+    if service.get("depends_on"):
+        violations.append("service honeypot: must not depend on any other service")
+    if service.get("build"):
+        violations.append("service honeypot: must run the pinned upstream image, not a build")
+    if service.get("restart", "no") != "no":
+        violations.append("service honeypot: restart must be 'no' in the isolation profile")
+    allowed = {
+        ("bind", COWRIE_ETC, True),
+        ("volume", COWRIE_LOG_DIR, False),
+    }
+    mounts = set()
+    for mount in _volume_mounts(service):
+        kind = str(mount.get("type"))
+        target = str(mount.get("target"))
+        read_only = mount.get("read_only") is True
+        mounts.add((kind, target, read_only))
+        if kind == "bind" and not str(mount.get("source", "")).endswith(
+            COWRIE_CONFIG_SOURCE_SUFFIX
+        ):
+            violations.append(f"service honeypot: unexpected bind mount {mount.get('source')}")
+        if kind == "volume" and mount.get("source") != HONEYPOT_LOG_VOLUME:
+            violations.append(f"service honeypot: unexpected volume {mount.get('source')}")
+    for extra in sorted(mounts - allowed):
+        violations.append(f"service honeypot: mount {extra} is not allowed")
+    for missing in sorted(allowed - mounts):
+        violations.append(f"service honeypot: required mount {missing} is missing")
+    tmpfs_targets = {str(entry).split(":", 1)[0] for entry in service.get("tmpfs") or []}
+    if COWRIE_VAR not in tmpfs_targets:
+        violations.append(f"service honeypot: {COWRIE_VAR} must be a bounded tmpfs")
     return violations

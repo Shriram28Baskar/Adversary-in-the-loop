@@ -100,6 +100,14 @@ def test_real_compose_honeypot_not_started_by_default(rendered_default: dict[str
     assert "honeypot" not in rendered_default["services"]
 
 
+def _pinned_variables() -> list[str]:
+    return [
+        line.split("=", 1)[0]
+        for line in VERSIONS_ENV.read_text().splitlines()
+        if line and not line.startswith("#")
+    ]
+
+
 def test_real_compose_requires_pinned_versions_file() -> None:
     """Without deploy/versions.env the image reference must fail loudly, not float."""
     result = subprocess.run(
@@ -111,27 +119,51 @@ def test_real_compose_requires_pinned_versions_file() -> None:
         env={"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": str(Path.home())},
     )
     assert result.returncode != 0
-    assert "POSTGRES_IMAGE" in result.stderr
+    assert "must be set via deploy/versions.env" in result.stderr
 
 
-def test_real_compose_migration_job_is_not_a_runtime_service(
-    rendered_default: dict[str, Any], rendered_all: dict[str, Any]
-) -> None:
-    """ADR-022: db-migrate exists only under its profile and is never started by `up`."""
-    assert "db-migrate" not in rendered_default["services"]
-    job = rendered_all["services"]["db-migrate"]
-    assert job["profiles"] == ["deploy-jobs"]
-    assert set(job["networks"]) == {"migrate-net"}
-    assert not job.get("ports")
-    assert not job.get("expose")
-    assert job["restart"] == "no"
+@pytest.mark.parametrize("variable", _pinned_variables())
+def test_every_pinned_image_variable_is_required(tmp_path: Path, variable: str) -> None:
+    """Dropping any single pinned value fails rendering, naming that value."""
+    lines = [
+        line
+        for line in VERSIONS_ENV.read_text().splitlines()
+        if not line.startswith(f"{variable}=")
+    ]
+    partial = tmp_path / "versions.env"
+    partial.write_text("\n".join(lines) + "\n")
+    result = subprocess.run(
+        [
+            "docker",
+            "compose",
+            "--env-file",
+            str(partial),
+            "-f",
+            str(COMPOSE_FILE),
+            "--profile",
+            "*",
+            "config",
+            "--format",
+            "json",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=REPO_ROOT,
+        env={"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": str(Path.home())},
+    )
+    assert result.returncode != 0
+    assert variable in result.stderr
 
 
-def test_real_compose_migrate_net_is_db_and_job_only(rendered_all: dict[str, Any]) -> None:
-    members = {n for n, s in rendered_all["services"].items() if "migrate-net" in s["networks"]}
-    assert members == {"db", "db-migrate"}
-    subnet = rendered_all["networks"]["migrate-net"]["ipam"]["config"][0]["subnet"]
-    assert subnet == compose_policy.MIGRATE_NET_SUBNET
+def test_versions_file_pins_every_image_by_digest() -> None:
+    for variable in _pinned_variables():
+        value = next(
+            line.split("=", 1)[1]
+            for line in VERSIONS_ENV.read_text().splitlines()
+            if line.startswith(f"{variable}=")
+        )
+        assert compose_policy._DIGEST_PINNED.search(value), variable
 
 
 def test_real_compose_uses_file_secrets_for_db(rendered_all: dict[str, Any]) -> None:
@@ -151,6 +183,18 @@ def _svc(*networks: str, **extra: Any) -> dict[str, Any]:
     return service
 
 
+def _hardened(mem: int, cpus: float, pids: int, user: str) -> dict[str, Any]:
+    return {
+        "read_only": True,
+        "cap_drop": ["ALL"],
+        "security_opt": ["no-new-privileges:true"],
+        "user": user,
+        "mem_limit": str(mem),
+        "cpus": cpus,
+        "pids_limit": pids,
+    }
+
+
 def _reference() -> tuple[dict[str, Any], dict[str, Any]]:
     """The full ARCHITECTURE.md §28 single-host topology in rendered form."""
     networks: dict[str, Any] = {
@@ -162,10 +206,29 @@ def _reference() -> tuple[dict[str, Any], dict[str, Any]]:
         "honeypot": _svc(
             "honeypot-net",
             profiles=["honeypot-isolation"],
-            volumes=[{"type": "volume", "source": "honeypot-logs", "target": "/logs"}],
+            restart="no",
+            **_hardened(512 * 1024 * 1024, 1.0, 256, "999:999"),
+            volumes=[
+                {
+                    "type": "bind",
+                    "source": "/repo/honeypot/cowrie/etc",
+                    "target": compose_policy.COWRIE_ETC,
+                    "read_only": True,
+                },
+                {
+                    "type": "volume",
+                    "source": "honeypot-logs",
+                    "target": compose_policy.COWRIE_LOG_DIR,
+                },
+            ],
+            tmpfs=[
+                f"{compose_policy.COWRIE_VAR}:size=16m",
+                "/cowrie/cowrie-git/var/lib/cowrie:size=64m",
+            ],
         ),
         "log-shipper": _svc(
             "ingest-net",
+            **_hardened(256 * 1024 * 1024, 0.5, 64, "65534:65534"),
             volumes=[
                 {
                     "type": "volume",
@@ -223,7 +286,10 @@ def _reference() -> tuple[dict[str, Any], dict[str, Any]]:
             "environment": {"AITL_MIGRATION_PASSWORD_FILE": "/run/secrets/aitl_migrator_password"},
         },
     }
-    rendered_all = {"services": services, "networks": networks}
+    volumes = {
+        "honeypot-logs": {"driver": "local", "driver_opts": {"type": "tmpfs", "o": "size=256m"}}
+    }
+    rendered_all = {"services": services, "networks": networks, "volumes": volumes}
     rendered_default = {
         "services": {k: v for k, v in services.items() if k not in ("honeypot", "db-migrate")},
         "networks": networks,
@@ -470,3 +536,103 @@ def test_detects_migrate_net_subnet_drift(subnet: str | None) -> None:
             all_["networks"]["migrate-net"]["ipam"]["config"][0]["subnet"] = subnet
 
     _assert_detected(_violations_after(mutate), "network migrate-net: subnet")
+
+
+# --- P3: honeypot and Log Shipper hardening -------------------------------------------
+
+
+@pytest.mark.parametrize("service", ["honeypot", "log-shipper"])
+@pytest.mark.parametrize(
+    ("key", "value", "fragment"),
+    [
+        ("privileged", True, "privileged containers are forbidden"),
+        ("network_mode", "host", "network_mode bypasses"),
+        ("pid", "host", "pid=host"),
+        ("ipc", "host", "ipc=host"),
+        ("read_only", False, "root filesystem must be read-only"),
+        ("cap_drop", [], "must drop all capabilities"),
+        ("cap_add", ["NET_ADMIN"], "must not add capabilities"),
+        ("devices", ["/dev/sda:/dev/sda"], "must not map host devices"),
+        ("security_opt", [], "no-new-privileges"),
+        ("user", "0:0", "non-root"),
+        ("user", None, "non-root"),
+        ("mem_limit", None, "mem_limit, cpus and pids_limit are required"),
+        ("pids_limit", 100000, "pids_limit"),
+        ("cpus", 8.0, "cpus"),
+        ("mem_limit", str(8 * 1024**3), "mem_limit"),
+        ("tmpfs", ["/scratch"], "must be size-bounded"),
+        ("ports", [{"target": 2222, "published": "22", "host_ip": "0.0.0.0"}], "publishes port"),
+        (
+            "ports",
+            [{"target": 2222, "published": "2222", "host_ip": "127.0.0.1"}],
+            "publishes port",
+        ),
+    ],
+)
+def test_detects_honeypot_side_hardening_regression(
+    service: str, key: str, value: Any, fragment: str
+) -> None:
+    def mutate(all_: dict[str, Any], _: dict[str, Any]) -> None:
+        if value is None:
+            all_["services"][service].pop(key, None)
+        else:
+            all_["services"][service][key] = value
+
+    _assert_detected(_violations_after(mutate), fragment)
+
+
+@pytest.mark.parametrize(
+    ("change", "fragment"),
+    [
+        (lambda h: h.update(environment={"COWRIE_SSH_FORWARDING": "true"}), "no environment"),
+        (lambda h: h.update(secrets=[{"source": "ingest_writer_password"}]), "no secret"),
+        (lambda h: h.update(depends_on={"db": {}}), "must not depend"),
+        (lambda h: h.update(build={"context": "."}), "pinned upstream image"),
+        (lambda h: h.update(restart="always"), "restart must be 'no'"),
+        (lambda h: h.update(image="cowrie/cowrie:latest"), "not pinned by sha256"),
+        (
+            lambda h: h["volumes"].append(
+                {"type": "bind", "source": "/var/run/docker.sock", "target": "/var/run/docker.sock"}
+            ),
+            "mounts the container-runtime socket",
+        ),
+        (
+            lambda h: h["volumes"].append({"type": "bind", "source": "/", "target": "/host"}),
+            "unexpected bind mount",
+        ),
+        (
+            lambda h: h["volumes"].append({"type": "volume", "source": "db-data", "target": "/x"}),
+            "unexpected volume",
+        ),
+        (lambda h: h["volumes"][0].update(read_only=False), "is not allowed"),
+        (lambda h: h["volumes"].pop(1), "required mount"),
+        (lambda h: h.update(tmpfs=["/cowrie/cowrie-git/var/lib/cowrie:size=64m"]), "bounded tmpfs"),
+        (lambda h: h["networks"].update({"ingest-net": None}), "service honeypot: networks"),
+        (lambda h: h["networks"].update({"core-net": None}), "service honeypot: networks"),
+        (lambda h: h["networks"].update({"migrate-net": None}), "service honeypot: networks"),
+        (lambda h: h["networks"].update({"sandbox-net": None}), "reachable from agent sandboxes"),
+        (lambda h: h["networks"].update({"llm-egress": None}), "service honeypot: networks"),
+    ],
+)
+def test_detects_honeypot_specific_regression(change: Any, fragment: str) -> None:
+    def mutate(all_: dict[str, Any], _: dict[str, Any]) -> None:
+        change(all_["services"]["honeypot"])
+
+    _assert_detected(_violations_after(mutate), fragment)
+
+
+def test_detects_unbounded_honeypot_log_volume() -> None:
+    def mutate(all_: dict[str, Any], _: dict[str, Any]) -> None:
+        all_["volumes"]["honeypot-logs"] = {"driver": "local"}
+
+    _assert_detected(_violations_after(mutate), "must be size-bounded")
+
+
+def test_real_compose_honeypot_covers_image_volumes(rendered_all: dict[str, Any]) -> None:
+    honeypot = rendered_all["services"]["honeypot"]
+    targets = {m["target"] for m in honeypot["volumes"]} | {
+        t.split(":", 1)[0] for t in honeypot["tmpfs"]
+    }
+    assert {compose_policy.COWRIE_ETC, compose_policy.COWRIE_VAR} <= targets
+    assert honeypot["user"] == "999:999"
+    assert "COWRIE" not in json.dumps(honeypot.get("environment") or {})
