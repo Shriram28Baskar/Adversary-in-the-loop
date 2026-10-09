@@ -1,0 +1,12 @@
+# Baseline policy baseline-permissive v1 (PRD FR-033a; ARCHITECTURE.md §37.6).
+# Every permission and data-flow rule ALLOWs; everything else about the
+# Gateway (canonicalization, logging, taint tracking, limits, fail-closed) is
+# unchanged. Used only as the enforced policy of a pair's baseline arm.
+policy_id: baseline-permissive
+version: 1
+description: Permissive baseline - allows every tool call and every data flow.
+tool_definitions_version: tool-definitions-v1
+permission_rules:
+  - {rule_id: baseline-allow-all, agent_role: assistant, tool: "*", endpoint: "*", resource_tier: "*", decision: ALLOW}
+dataflow_rules:
+  - {rule_id: baseline-dataflow-allow-all, source_tier: "*", destination_trust: "*", decision: ALLOW}

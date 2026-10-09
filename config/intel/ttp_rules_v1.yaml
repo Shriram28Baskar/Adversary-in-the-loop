@@ -1,0 +1,72 @@
+# TTP rules v1 (PRD FR-007, FR-008; ARCHITECTURE.md §11).
+# (behavior phase, token/prefix match) -> (TTP label, fixed confidence).
+# Several matching rules yield several TTPs; per label, confidence is the max.
+version: ttp-rules-v1
+attack_mapping_version: attack-mapping-v1
+phase_rules_version: phase-rules-v1
+rules:
+  - {rule_id: TR-01, phase: scanning, match: {kind: phase}, label: active_scanning, confidence: 0.40}
+  - {rule_id: TR-02, phase: credential_probing, match: {kind: phase}, label: password_guessing, confidence: 0.90}
+  - rule_id: TR-03
+    phase: discovery
+    match: {kind: command, commands: [uname, hostname]}
+    label: system_information_discovery
+    confidence: 0.90
+  - rule_id: TR-04
+    phase: discovery
+    match: {kind: command_with_argument_prefix, commands: [cat], argument_prefixes: [/proc/cpuinfo, /etc/os-release]}
+    label: system_information_discovery
+    confidence: 0.80
+  - rule_id: TR-05
+    phase: discovery
+    match: {kind: command, commands: [ls, find]}
+    label: file_and_directory_discovery
+    confidence: 0.80
+  - rule_id: TR-06
+    phase: discovery
+    match: {kind: command, commands: [whoami, id, w, who]}
+    label: system_owner_user_discovery
+    confidence: 0.90
+  - rule_id: TR-07
+    phase: discovery
+    match: {kind: command, commands: [ps]}
+    label: process_discovery
+    confidence: 0.90
+  - rule_id: TR-08
+    phase: discovery
+    match: {kind: command_with_argument_prefix, commands: [cat], argument_prefixes: [/etc/passwd]}
+    label: local_account_discovery
+    confidence: 0.90
+  - rule_id: TR-09
+    phase: discovery
+    match: {kind: command, commands: [ifconfig, ip, netstat]}
+    label: network_configuration_discovery
+    confidence: 0.80
+  - rule_id: TR-10
+    phase: credential_file_access
+    match: {kind: command_with_argument_prefix, commands: [cat, head, tail, less, more, cp], argument_prefixes: [~/.ssh/, /root/.ssh/, .ssh/]}
+    label: private_keys
+    confidence: 0.90
+  - rule_id: TR-11
+    phase: credential_file_access
+    match: {kind: command_with_argument_prefix, commands: [cat, head, tail, less, more, cp], argument_prefixes: [~/.aws/, /root/.aws/, .aws/, .env, /root/.env, .git-credentials, .netrc]}
+    label: credentials_in_files
+    confidence: 0.90
+  - {rule_id: TR-12, phase: collection, match: {kind: phase}, label: data_from_local_system, confidence: 0.70}
+  - {rule_id: TR-13, phase: exfiltration_attempt, match: {kind: phase}, label: exfiltration_alternative_protocol, confidence: 0.70}
+  - {rule_id: TR-14, phase: ingress_transfer, match: {kind: phase}, label: ingress_tool_transfer, confidence: 0.90}
+  - rule_id: TR-15
+    phase: execution
+    match: {kind: command, commands: [sh, bash]}
+    label: unix_shell_execution
+    confidence: 0.80
+  - rule_id: TR-16
+    phase: execution
+    match: {kind: command_prefix, prefixes: [./]}
+    label: unix_shell_execution
+    confidence: 0.60
+  - rule_id: TR-17
+    phase: execution
+    match: {kind: command_prefix, prefixes: [./xmrig, ./minerd]}
+    label: resource_hijacking
+    confidence: 0.60

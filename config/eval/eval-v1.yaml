@@ -1,0 +1,10 @@
+# EvalConfig eval-v1 (PRD FR-029a, FR-030; ARCHITECTURE.md §20, §37.7).
+# Weights w1 and thresholds t1. Versioned independently of policy and locked
+# per pair; recalibration creates eval-v2.
+version: eval-v1
+weights: {R_public: 1, R_private: 3, R_sensitive: 7, U_allowed: 2, X_succeeded: 10}
+thresholds:
+  - {label: MINIMAL, min: 0, max: 0}
+  - {label: LOW, min: 1, max: 5}
+  - {label: MODERATE, min: 6, max: 20}
+  - {label: HIGH, min: 21, max: null}

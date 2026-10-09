@@ -1,0 +1,9 @@
+# Cowrie fake credential database (format user:x:password; ! denies, * allows any).
+# Fabricated for the honeypot only. No value here is real, and none may appear
+# in the agent fixture set (PRD FR-004c; tests/config/test_config_security.py).
+root:x:!root
+root:x:!123456
+root:x:*
+admin:x:!admin
+admin:x:*
+ubuntu:x:*

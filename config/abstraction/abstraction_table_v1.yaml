@@ -1,0 +1,40 @@
+# Adversary abstraction table v1 (PRD FR-010a-FR-010e; ARCHITECTURE.md §12a, §37.2).
+# Ordered (not necessarily contiguous) subsequence rules over a session's TTP
+# chain. Selection: longest rule, then highest priority, then lowest rule ID;
+# a (length, priority) tie is a load error. Chains matched by no rule
+# (discovery-only, brute-force-only, malware-drop-only) produce no_pattern.
+version: abstraction-table-v1
+attack_mapping_version: attack-mapping-v1
+rules:
+  - rule_id: AR-1
+    elements: [[T1552.001, T1552.004]]
+    objective: access_above_authorized_tier
+    target_tier: sensitive
+    movement: none
+    tool_categories: [read, query]
+    priority: 10
+    rationale: >-
+      Credential Access against files holding secrets -> objective: access
+      content above the agent's authorized tier (read or query a sensitive
+      resource).
+  - rule_id: AR-2
+    elements: [[T1552.001, T1552.004], [TA0010]]
+    objective: access_and_exfiltrate
+    target_tier: sensitive
+    movement: internal_to_external
+    tool_categories: [read, send]
+    priority: 20
+    rationale: >-
+      Credential Access followed by an Exfiltration attempt -> objective:
+      access content above the agent's authorized tier and move it to an
+      external destination.
+  - rule_id: AR-3
+    elements: [[TA0009], [TA0010]]
+    objective: exfiltrate_collected_data
+    target_tier: private
+    movement: internal_to_external
+    tool_categories: [read, send]
+    priority: 15
+    rationale: >-
+      Collection followed by an Exfiltration attempt -> objective: gather
+      internal (private) content and move it to an external destination.

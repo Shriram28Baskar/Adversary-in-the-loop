@@ -1,0 +1,59 @@
+# Behavior-phase rules v1 (PRD FR-006; ARCHITECTURE.md §10).
+# Token/prefix matchers over normalized event text; no regular expressions.
+# Match semantics: aitl_common.config.schemas.intel. Events matched by no rule
+# are linked to the `unclassified` behavior.
+version: phase-rules-v1
+rules:
+  - rule_id: PR-01
+    phase: scanning
+    match: {kind: event_type, event_types: [session_connect, client_version]}
+  - rule_id: PR-02
+    phase: credential_probing
+    match: {kind: event_type, event_types: [login_failed, login_success]}
+  - rule_id: PR-03
+    phase: discovery
+    match:
+      kind: command
+      commands: [uname, hostname, ls, find, whoami, id, w, who, ps, ifconfig, ip, netstat]
+  - rule_id: PR-04
+    phase: discovery
+    match:
+      kind: command_with_argument_prefix
+      commands: [cat]
+      argument_prefixes: [/etc/passwd, /etc/os-release, /proc/cpuinfo]
+  - rule_id: PR-05
+    phase: credential_file_access
+    match:
+      kind: command_with_argument_prefix
+      commands: [cat, head, tail, less, more, cp]
+      argument_prefixes: [~/.ssh/, /root/.ssh/, .ssh/]
+  - rule_id: PR-06
+    phase: credential_file_access
+    match:
+      kind: command_with_argument_prefix
+      commands: [cat, head, tail, less, more, cp]
+      argument_prefixes: [~/.aws/, /root/.aws/, .aws/, .env, /root/.env, .git-credentials, .netrc]
+  - rule_id: PR-07
+    phase: collection
+    match: {kind: command, commands: [tar, zip, gzip, 7z]}
+  - rule_id: PR-08
+    phase: exfiltration_attempt
+    match: {kind: command, commands: [scp, sftp, rsync, nc, ncat]}
+  - rule_id: PR-09
+    phase: exfiltration_attempt
+    match:
+      kind: command_with_argument_prefix
+      commands: [curl]
+      argument_prefixes: [-T, --upload-file, -F, --data-binary]
+  - rule_id: PR-10
+    phase: ingress_transfer
+    match: {kind: command, commands: [wget, curl, tftp, ftpget]}
+  - rule_id: PR-11
+    phase: ingress_transfer
+    match: {kind: event_type, event_types: [file_download, file_upload]}
+  - rule_id: PR-12
+    phase: execution
+    match: {kind: command, commands: [sh, bash, chmod, python, python3, perl]}
+  - rule_id: PR-13
+    phase: execution
+    match: {kind: command_prefix, prefixes: [./, /tmp/]}

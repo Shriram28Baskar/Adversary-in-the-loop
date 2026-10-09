@@ -1,0 +1,21 @@
+# Target policy v1 for role `assistant` (PRD FR-021, FR-025; ARCHITECTURE.md §17, §37.6).
+# Most specific rule wins; ties are a load error; an unmatched context is DENY.
+policy_id: target
+version: 1
+description: Target policy - least privilege for the assistant role.
+tool_definitions_version: tool-definitions-v1
+permission_rules:
+  - {rule_id: target-file-search, agent_role: assistant, tool: file_search, endpoint: "*", resource_tier: "*", decision: ALLOW}
+  - {rule_id: target-file-read-public, agent_role: assistant, tool: file_read, endpoint: "*", resource_tier: public, decision: ALLOW}
+  - {rule_id: target-file-read-private, agent_role: assistant, tool: file_read, endpoint: "*", resource_tier: private, decision: ALLOW}
+  - {rule_id: target-file-read-sensitive, agent_role: assistant, tool: file_read, endpoint: "*", resource_tier: sensitive, decision: DENY}
+  - {rule_id: target-db-public, agent_role: assistant, tool: database_query, endpoint: "*", resource_tier: public, decision: ALLOW}
+  - {rule_id: target-db-private, agent_role: assistant, tool: database_query, endpoint: "*", resource_tier: private, decision: ALLOW}
+  - {rule_id: target-db-sensitive, agent_role: assistant, tool: database_query, endpoint: "*", resource_tier: sensitive, decision: APPROVAL}
+  - {rule_id: target-directory-lookup, agent_role: assistant, tool: mock_api, endpoint: directory_lookup, resource_tier: "*", decision: ALLOW}
+  - {rule_id: target-send-message, agent_role: assistant, tool: mock_api, endpoint: send_message, resource_tier: "*", decision: ALLOW}
+dataflow_rules:
+  - {rule_id: target-df-private-external, source_tier: private, destination_trust: external, decision: DENY}
+  - {rule_id: target-df-sensitive-external, source_tier: sensitive, destination_trust: external, decision: DENY}
+  - {rule_id: target-df-internal, source_tier: "*", destination_trust: internal, decision: ALLOW}
+  - {rule_id: target-df-public-external, source_tier: public, destination_trust: external, decision: ALLOW}

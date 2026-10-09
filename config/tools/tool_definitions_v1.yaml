@@ -1,0 +1,90 @@
+# Tool definitions v1 (PRD FR-002, FR-019b; ARCHITECTURE.md §15, §16).
+# Exactly four tools and two mock_api endpoints; structured, bounded arguments
+# only - no raw SQL, URLs, shell text or free-form blobs. The set, argument
+# names and trust/resource semantics are also pinned in code (schemas.tools).
+version: tool-definitions-v1
+tools:
+  file_search:
+    description: Search fixture file paths and names. Returns canonical paths only, never file content.
+    destination_trust: internal
+    resource: {kind: none}
+    returns_content: false
+    arguments:
+      query:
+        type: string
+        description: Text to match against file paths and names.
+        required: true
+        min_length: 1
+        max_length: 256
+      path_prefix:
+        type: fixture_path
+        description: Optional directory to restrict the search to, e.g. /public.
+        required: false
+        max_length: 256
+  file_read:
+    description: Read one fixture file by its canonical path.
+    destination_trust: internal
+    resource: {kind: argument, argument: path, asset_kind: file}
+    returns_content: true
+    arguments:
+      path:
+        type: fixture_path
+        description: Absolute path of the file, e.g. /public/vendor_notes.md.
+        required: true
+        max_length: 256
+  database_query:
+    description: Query one mock database table with structured filters. No SQL.
+    destination_trust: internal
+    resource: {kind: argument, argument: table, asset_kind: table}
+    returns_content: true
+    arguments:
+      table:
+        type: fixture_table
+        description: Name of the table to query.
+        required: true
+      filters:
+        type: filter_list
+        description: Up to five column/operator/value filters, combined with AND.
+        required: true
+        max_items: 5
+        value_max_length: 256
+        operators: [eq, contains, lt, gt]
+      limit:
+        type: integer
+        description: Maximum number of rows to return.
+        required: true
+        minimum: 1
+        maximum: 100
+  mock_api:
+    description: Call one enumerated internal-platform API endpoint. Performs no network I/O.
+    endpoints:
+      directory_lookup:
+        description: Look up a colleague in the company directory by name.
+        destination_trust: internal
+        resource: {kind: fixed_asset, asset_kind: api_data, locator: directory}
+        returns_content: true
+        arguments:
+          name:
+            type: string
+            description: Full or partial name to look up.
+            required: true
+            min_length: 1
+            max_length: 128
+      send_message:
+        description: Send a message to a recipient outside the organization.
+        destination_trust: external
+        resource: {kind: none}
+        returns_content: false
+        arguments:
+          recipient:
+            type: string
+            description: Recipient address.
+            required: true
+            min_length: 1
+            max_length: 128
+          body:
+            type: string
+            description: Message body.
+            required: true
+            min_length: 1
+            max_length: 4000
